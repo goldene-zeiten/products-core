@@ -1,0 +1,86 @@
+<div class="basket">
+    <h2><f:translate key="shopping_basket" /></h2>
+    <f:flashMessages />
+    <f:if condition="{basket.empty}">
+        <f:then>
+            <p><f:translate key="basket_empty" /></p>
+        </f:then>
+        <f:else>
+            <f:render partial="Basket/Notices" arguments="{basket: basket, settings: settings}" />
+            <table class="table">
+                <thead>
+                    <tr>
+                        <th><f:translate key="product" /></th>
+                        <th><f:translate key="quantity" /></th>
+                        <th><f:translate key="price" /></th>
+                        <th><f:translate key="total" /></th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <f:for each="{basket.items}" as="item">
+                        <tr>
+                            <td>
+                                {item.product.title}
+                                <f:if condition="{item.article}">
+                                    <f:then>
+                                        <br><small>{item.article.title}</small>
+                                    </f:then>
+                                </f:if>
+                            </td>
+                            <td>
+                                <f:form action="update" controller="Basket">
+                                    <f:form.hidden name="product" value="{item.product.uid}" />
+                                    <f:if condition="{item.article}">
+                                        <f:then>
+                                            <f:form.hidden name="article" value="{item.article.uid}" />
+                                        </f:then>
+                                    </f:if>
+                                    <f:form.textfield name="quantity" value="{item.quantity}" size="3" />
+                                    <f:form.submit value="{f:translate(key: 'update')}" />
+                                </f:form>
+                            </td>
+                            <td>{item.unitPriceGross.decimalString} {basket.currency}</td>
+                            <td>{item.lineTotalGross.decimalString} {basket.currency}</td>
+                            <td>
+                                <f:link.action action="remove" controller="Basket" arguments="{product: item.product.uid, article: item.article.uid}" class="btn btn-danger btn-sm"><f:translate key="remove" /></f:link.action>
+                            </td>
+                        </tr>
+                    </f:for>
+                </tbody>
+                <tfoot>
+                    <tr>
+                        <th colspan="3"><f:translate key="total_net" /></th>
+                        <td>{basket.totalNet.decimalString} {basket.currency}</td>
+                        <td></td>
+                    </tr>
+                    <tr>
+                        <th colspan="3"><f:translate key="tax" /></th>
+                        <td>{basket.totalTax.decimalString} {basket.currency}</td>
+                        <td></td>
+                    </tr>
+                    <tr>
+                        <th colspan="3"><f:translate key="total_gross" /></th>
+                        <td><strong>{basket.totalGross.decimalString} {basket.currency}</strong></td>
+                        <td></td>
+                    </tr>
+                    <f:if condition="{basket.depositTotal.cents} > 0">
+                        <f:then>
+                            <tr>
+                                <th colspan="3"><f:translate key="deposit_total" /></th>
+                                <td>{basket.depositTotal.decimalString} {basket.currency}</td>
+                                <td></td>
+                            </tr>
+                        </f:then>
+                    </f:if>
+                </tfoot>
+            </table>
+
+            <f:render partial="Discount/VoucherBasket" arguments="{basket: basket}" />
+
+            <div class="actions">
+                <f:link.action action="address" controller="Checkout" pageUid="{settings.pids.checkoutPage}" class="btn btn-primary"><f:translate key="proceed_to_checkout" /></f:link.action>
+            </div>
+        </f:else>
+    </f:if>
+</div>

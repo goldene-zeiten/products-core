@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+    <g transform="translate(8, 8) scale(3)">
+        <path fill="currentColor" d="M8 1.3 14 4.65 8 8 2 4.65Z"/>
+        <path fill="currentColor" opacity=".8" d="M8 8v6.7L2 11.35v-6.7Z"/>
+        <path fill="currentColor" opacity=".6" d="M8 8v6.7l6-3.35v-6.7Z"/>
+    </g>
+</svg>
