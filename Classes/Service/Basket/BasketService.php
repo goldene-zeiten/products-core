@@ -21,6 +21,7 @@ use GoldeneZeiten\Products\Core\Pricing\GraduatedPriceProvider;
 use GoldeneZeiten\Products\Core\Pricing\PriceProviderInterface;
 use GoldeneZeiten\Products\Core\Service\PriceRoundingService;
 use GoldeneZeiten\Products\Core\Service\TaxService;
+use GoldeneZeiten\Products\Core\Visibility\ProductVisibilityResolver;
 use Psr\EventDispatcher\EventDispatcherInterface;
 use Psr\Http\Message\ServerRequestInterface;
 
@@ -36,25 +37,26 @@ final class BasketService
         private readonly PriceRoundingService $priceRoundingService,
         private readonly BasketQuantityResolver $basketQuantityResolver,
         private readonly GraduatedPriceProvider $graduatedPriceProvider,
-        private readonly EventDispatcherInterface $eventDispatcher
+        private readonly EventDispatcherInterface $eventDispatcher,
+        private readonly ProductVisibilityResolver $productVisibilityResolver
     ) {}
 
     public function add(ServerRequestInterface $request, int $productUid, ?int $articleUid, int $quantity): void
     {
-        $product = $this->productRepository->findByUid($productUid);
-        if (!$product instanceof Product) {
-            return;
-        }
-
-        if ($articleUid === null && $product->getArticles()->count() > 0) {
+        $product = $this->findVisibleProduct($productUid, $request);
+        if ($product === null) {
             return;
         }
 
         $article = $this->resolveArticle($articleUid);
-        $quantity = $this->basketQuantityResolver->clamp($product, $article, $quantity);
+        if (!$this->isArticleOfProduct($product, $articleUid, $article)) {
+            return;
+        }
 
         $basket = $this->basketStorage->load($request);
-        $basket->addItem(new BasketItem($productUid, $articleUid, $quantity));
+        $lineQuantity = $basket->getQuantity($productUid, $articleUid) + max(1, $quantity);
+        $lineQuantity = $this->basketQuantityResolver->clamp($product, $article, $lineQuantity);
+        $basket->replaceItem(new BasketItem($productUid, $articleUid, $lineQuantity));
         $basket = $this->dispatchBasketUpdated($request, $basket);
         $this->basketStorage->save($request, $basket);
     }
@@ -79,6 +81,19 @@ final class BasketService
         $event = new BasketUpdatedEvent($basket, $request);
         $this->eventDispatcher->dispatch($event);
         return $event->getBasket();
+    }
+
+    /**
+     * A line is priced from its article but titled from its product, so the article must be one of the
+     * product's own; a product with variants cannot be bought without one.
+     */
+    private function isArticleOfProduct(Product $product, ?int $articleUid, ?Article $article): bool
+    {
+        if ($articleUid === null) {
+            return $product->getArticles()->count() === 0;
+        }
+
+        return $article instanceof Article && $article->getProduct()?->getUid() === $product->getUid();
     }
 
     private function resolveArticle(?int $articleUid): ?Article
@@ -154,16 +169,26 @@ final class BasketService
         );
     }
 
-    private function resolveItem(BasketItem $item, ProductsConfiguration $configuration, ServerRequestInterface $request): ?BasketViewItem
+    private function findVisibleProduct(int $productUid, ServerRequestInterface $request): ?Product
     {
-        $product = $this->productRepository->findByUid($item->getProductUid());
-        if (!$product instanceof Product) {
+        $product = $this->productRepository->findByUid($productUid);
+        if (!$product instanceof Product || !$this->productVisibilityResolver->isVisible($product, $request)) {
             return null;
         }
 
-        $article = null;
-        if ($item->getArticleUid() !== null) {
-            $article = $this->articleRepository->findByUid($item->getArticleUid());
+        return $product;
+    }
+
+    private function resolveItem(BasketItem $item, ProductsConfiguration $configuration, ServerRequestInterface $request): ?BasketViewItem
+    {
+        $product = $this->findVisibleProduct($item->getProductUid(), $request);
+        if ($product === null) {
+            return null;
+        }
+
+        $article = $this->resolveArticle($item->getArticleUid());
+        if (!$this->isArticleOfProduct($product, $item->getArticleUid(), $article)) {
+            return null;
         }
 
         $basePrice = $this->priceProvider->getUnitPrice($product, $article, $item->getQuantity(), $request);

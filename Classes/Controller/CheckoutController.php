@@ -10,27 +10,36 @@ use GoldeneZeiten\Products\Core\Domain\Dto\Checkout\CheckoutChoices;
 use GoldeneZeiten\Products\Core\Domain\Dto\Payment\PaymentContext;
 use GoldeneZeiten\Products\Core\Domain\Dto\Shipping\ShippingContext;
 use GoldeneZeiten\Products\Core\Domain\Dto\Shipping\ShippingOption;
+use GoldeneZeiten\Products\Core\Domain\Dto\Shipping\ShippingSelection;
+use GoldeneZeiten\Products\Core\Domain\Validator\AddressValidator;
 use GoldeneZeiten\Products\Core\Event\EnrichCheckoutReviewEvent;
+use GoldeneZeiten\Products\Core\Payment\Exception\PaymentMethodNotAvailableException;
 use GoldeneZeiten\Products\Core\Payment\Exception\PaymentMethodNotFoundException;
 use GoldeneZeiten\Products\Core\Payment\PaymentContextFactory;
 use GoldeneZeiten\Products\Core\Payment\PaymentMethodInterface;
 use GoldeneZeiten\Products\Core\Payment\PaymentMethodRegistry;
+use GoldeneZeiten\Products\Core\Service\Checkout\AddressCompletenessChecker;
 use GoldeneZeiten\Products\Core\Service\Checkout\CheckoutService;
 use GoldeneZeiten\Products\Core\Service\Checkout\PriceQuoteService;
 use GoldeneZeiten\Products\Core\Service\FrontendUserResolver;
 use GoldeneZeiten\Products\Core\Service\Invoice\InvoiceTokenService;
+use GoldeneZeiten\Products\Core\Service\Order\Exception\IncompleteAddressException;
 use GoldeneZeiten\Products\Core\Service\Order\Exception\OrderPlacementExceptionInterface;
 use GoldeneZeiten\Products\Core\Service\Order\OrderPlacementService;
 use GoldeneZeiten\Products\Core\Service\Order\OrderTokenService;
 use GoldeneZeiten\Products\Core\Service\Withdrawal\WithdrawalExclusionService;
 use GoldeneZeiten\Products\Core\Service\Withdrawal\WithdrawalTokenService;
+use GoldeneZeiten\Products\Core\Shipping\Exception\MissingShippingOptionException;
+use GoldeneZeiten\Products\Core\Shipping\Exception\NoShippingOptionAvailableException;
 use GoldeneZeiten\Products\Core\Shipping\ShippingContextFactory;
 use GoldeneZeiten\Products\Core\Shipping\ShippingQuoteService;
 use Psr\Http\Message\ResponseInterface;
+use TYPO3\CMS\Core\Http\PropagateResponseException;
 use TYPO3\CMS\Core\Http\RedirectResponse;
 use TYPO3\CMS\Core\Type\ContextualFeedbackSeverity;
 use TYPO3\CMS\Extbase\Mvc\Controller\ActionController;
 use TYPO3\CMS\Extbase\Utility\LocalizationUtility;
+use TYPO3\CMS\Extbase\Validation\Validator\ConjunctionValidator;
 
 final class CheckoutController extends ActionController
 {
@@ -47,7 +56,8 @@ final class CheckoutController extends ActionController
         private readonly OrderTokenService $orderTokenService,
         private readonly ProductsConfigurationFactory $configurationFactory,
         private readonly PriceQuoteService $priceQuoteService,
-        private readonly WithdrawalExclusionService $withdrawalExclusionService
+        private readonly WithdrawalExclusionService $withdrawalExclusionService,
+        private readonly AddressCompletenessChecker $addressCompletenessChecker
     ) {}
 
     public function addressAction(): ResponseInterface
@@ -62,8 +72,24 @@ final class CheckoutController extends ActionController
         return $this->htmlResponse();
     }
 
+    /**
+     * Adds the billing address rules to the argument's validation, so an incomplete address re-renders the
+     * address form with a message at each invalid field.
+     */
+    protected function initializeSubmitAddressAction(): void
+    {
+        $validator = $this->arguments->getArgument('address')->getValidator();
+        $addressValidator = $this->validatorResolver->createValidator(AddressValidator::class, [], $this->request);
+        if ($validator instanceof ConjunctionValidator && $addressValidator !== null) {
+            $validator->addValidator($addressValidator);
+        }
+    }
+
     public function submitAddressAction(Address $address, bool $shipToDifferentAddress = false, ?Address $deliveryAddress = null, string $giftMessage = ''): ResponseInterface
     {
+        if ($shipToDifferentAddress && !$this->addressCompletenessChecker->isComplete($deliveryAddress ?? new Address(), emailRequired: false)) {
+            $this->backToStep('address', $this->translate('checkout_delivery_address_incomplete'));
+        }
         $this->checkoutService->setAddress($this->request, $address);
         $this->checkoutService->setDeliveryAddress($this->request, $shipToDifferentAddress ? $deliveryAddress : null);
         $this->checkoutService->setGiftMessage($this->request, $giftMessage);
@@ -89,8 +115,12 @@ final class CheckoutController extends ActionController
         return $this->htmlResponse();
     }
 
-    public function submitShippingMethodAction(string $shippingOption): ResponseInterface
+    public function submitShippingMethodAction(string $shippingOption = ''): ResponseInterface
     {
+        $configuration = $this->configurationFactory->create($this->request);
+        if (!$this->shippingQuoteService->isOffered($configuration, $this->shippingContext(), $shippingOption)) {
+            $this->backToStep('shippingMethod', $this->translate('checkout_shipping_option_required'));
+        }
         $this->checkoutService->setShippingOption($this->request, $shippingOption);
         return $this->redirect('payment');
     }
@@ -137,6 +167,17 @@ final class CheckoutController extends ActionController
         return $cheapest?->getKey() ?? '';
     }
 
+    /**
+     * Sends the customer back to a checkout step with an error message. The redirect is propagated as the
+     * response of the whole request, as this plugin is not cached and a returned redirect would only be
+     * sent as a header on a fully rendered page.
+     */
+    private function backToStep(string $action, string $message): never
+    {
+        $this->addFlashMessage($message, '', ContextualFeedbackSeverity::ERROR);
+        throw new PropagateResponseException($this->redirect($action), 1791662865);
+    }
+
     private function translate(string $key): string
     {
         return (string)LocalizationUtility::translate($key, 'ProductsCore');
@@ -150,19 +191,24 @@ final class CheckoutController extends ActionController
         return $this->htmlResponse();
     }
 
-    public function submitPaymentAction(string $paymentMethod): ResponseInterface
+    public function submitPaymentAction(string $paymentMethod = ''): ResponseInterface
     {
+        try {
+            $this->paymentMethodRegistry->getAvailableMethod($paymentMethod, $this->buildPaymentContext());
+        } catch (PaymentMethodNotAvailableException) {
+            $this->backToStep('payment', $this->translate('checkout_payment_method_required'));
+        }
         $this->checkoutService->setPaymentMethod($this->request, $paymentMethod);
         return $this->redirect('review');
     }
 
     public function reviewAction(): ResponseInterface
     {
+        $shippingSelection = $this->resolveShippingSelectionForReview();
         $basket = $this->checkoutService->getBasketViewModel($this->request);
         $this->priceQuoteService->freeze($this->request, $basket);
         $address = $this->checkoutService->getAddress($this->request);
         $paymentMethodIdentifier = $this->checkoutService->getPaymentMethod($this->request);
-        $shippingOptionKey = $this->checkoutService->getShippingOption($this->request);
 
         $enrichEvent = new EnrichCheckoutReviewEvent($this->request);
         $this->eventDispatcher->dispatch($enrichEvent);
@@ -171,13 +217,30 @@ final class CheckoutController extends ActionController
             'basket' => $basket,
             'address' => $address,
             'paymentMethod' => $this->findPaymentMethod($paymentMethodIdentifier),
-            'shippingSelection' => $this->shippingQuoteService->resolveSelection($this->configurationFactory->create($this->request), $this->shippingContext(), $shippingOptionKey, $this->request),
+            'shippingSelection' => $shippingSelection,
             'deliveryAddress' => $this->checkoutService->getDeliveryAddress($this->request),
             'giftMessage' => $this->checkoutService->getGiftMessage($this->request),
             'withdrawalWaiverRequired' => $this->withdrawalExclusionService->basketRequiresWaiver($basket),
             'withdrawalExemptPersonalizedItems' => $this->withdrawalExclusionService->basketContainsPersonalized($basket),
         ] + $enrichEvent->getVariables());
         return $this->htmlResponse();
+    }
+
+    /**
+     * The basket or address may have changed since the shipping step, so the stored choice can be gone.
+     */
+    private function resolveShippingSelectionForReview(): ShippingSelection
+    {
+        try {
+            return $this->shippingQuoteService->resolveSelection(
+                $this->configurationFactory->create($this->request),
+                $this->shippingContext(),
+                $this->checkoutService->getShippingOption($this->request),
+                $this->request
+            );
+        } catch (MissingShippingOptionException|NoShippingOptionAvailableException) {
+            $this->backToStep('shippingMethod', $this->translate('checkout_shipping_option_unavailable'));
+        }
     }
 
     private function findPaymentMethod(string $identifier): ?PaymentMethodInterface
@@ -208,8 +271,7 @@ final class CheckoutController extends ActionController
         try {
             $result = $this->orderPlacementService->place($this->request, $address, $paymentMethodIdentifier, $choices);
         } catch (OrderPlacementExceptionInterface $exception) {
-            $this->addFlashMessage($exception->getMessage(), '', ContextualFeedbackSeverity::ERROR);
-            return $this->redirect('review');
+            $this->backToStep($this->stepToCorrect($exception), $exception->getMessage());
         }
 
         if ($result->requiresRedirect()) {
@@ -220,6 +282,19 @@ final class CheckoutController extends ActionController
             'order' => $result->getOrder()->getUid(),
             'hash' => $this->orderTokenService->generateToken($result->getOrder()),
         ]);
+    }
+
+    /**
+     * The checkout step where the customer can correct what made the placement fail.
+     */
+    private function stepToCorrect(OrderPlacementExceptionInterface $exception): string
+    {
+        return match (true) {
+            $exception instanceof IncompleteAddressException => 'address',
+            $exception instanceof PaymentMethodNotAvailableException => 'payment',
+            $exception instanceof MissingShippingOptionException, $exception instanceof NoShippingOptionAvailableException => 'shippingMethod',
+            default => 'review',
+        };
     }
 
     /**
