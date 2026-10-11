@@ -8,7 +8,10 @@ use GoldeneZeiten\Products\Core\Domain\Dto\Category\CategoryTreeNode;
 use GoldeneZeiten\Products\Core\Domain\Model\Category;
 use GoldeneZeiten\Products\Core\Domain\Model\Product;
 use GoldeneZeiten\Products\Core\Domain\Repository\ProductRepository;
+use GoldeneZeiten\Products\Core\Pricing\PriceProviderInterface;
 use GoldeneZeiten\Products\Core\Service\Category\CategoryTreeService;
+use GoldeneZeiten\Products\Core\Visibility\ProductVisibilityResolver;
+use Psr\Http\Message\ServerRequestInterface;
 use Symfony\Component\DependencyInjection\Attribute\AutoconfigureTag;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Extbase\DomainObject\AbstractEntity;
@@ -43,6 +46,8 @@ final class CategoryProductTreeProcessor implements DataProcessorInterface
         private readonly CategoryTreeService $categoryTreeService,
         private readonly ProductRepository $productRepository,
         private readonly ContentDataProcessor $contentDataProcessor,
+        private readonly ProductVisibilityResolver $productVisibilityResolver,
+        private readonly PriceProviderInterface $priceProvider,
     ) {}
 
     /**
@@ -81,7 +86,7 @@ final class CategoryProductTreeProcessor implements DataProcessorInterface
         $titleField = (string)($cObj->stdWrapValue('titleField', $processorConfiguration) ?: self::DEFAULT_TITLE_FIELD);
         $nestedDataProcessing = $processorConfiguration['dataProcessing.'] ?? [];
         $children = $this->limitChildren($rootNode->getChildren(), $cObj, $processorConfiguration);
-        return $this->buildNode($rootNode, $children, $titleField, is_array($nestedDataProcessing) ? $nestedDataProcessing : []);
+        return $this->buildNode($rootNode, $children, $titleField, is_array($nestedDataProcessing) ? $nestedDataProcessing : [], $cObj->getRequest());
     }
 
     /**
@@ -107,7 +112,7 @@ final class CategoryProductTreeProcessor implements DataProcessorInterface
      * @param array<int|string, mixed> $nestedDataProcessing
      * @return array<string, mixed>
      */
-    private function buildNode(CategoryTreeNode $node, array $children, string $titleField, array $nestedDataProcessing): array
+    private function buildNode(CategoryTreeNode $node, array $children, string $titleField, array $nestedDataProcessing, ServerRequestInterface $request): array
     {
         $category = $node->getCategory();
         $rawFields = $this->toRawFieldArray($category);
@@ -118,9 +123,9 @@ final class CategoryProductTreeProcessor implements DataProcessorInterface
             'slugPath' => $node->getSlugPath(),
             'depth' => $node->getDepth(),
             'discountPercent' => $category->getDiscountPercent(),
-            'products' => $this->buildProducts($category),
+            'products' => $this->buildProducts($category, $request),
             'children' => array_map(
-                fn(CategoryTreeNode $child): array => $this->buildNode($child, $child->getChildren(), $titleField, $nestedDataProcessing),
+                fn(CategoryTreeNode $child): array => $this->buildNode($child, $child->getChildren(), $titleField, $nestedDataProcessing, $request),
                 $children
             ),
             'data' => $rawFields,
@@ -131,25 +136,25 @@ final class CategoryProductTreeProcessor implements DataProcessorInterface
     /**
      * @return array<int, array<string, mixed>>
      */
-    private function buildProducts(Category $category): array
+    private function buildProducts(Category $category, ServerRequestInterface $request): array
     {
         return array_map(
-            fn(Product $product): array => $this->buildProductOutput($product),
-            $this->productRepository->findByCategory($category)
+            fn(Product $product): array => $this->buildProductOutput($product, $request),
+            $this->productVisibilityResolver->filterVisible($this->productRepository->findByCategory($category), $request)
         );
     }
 
     /**
      * @return array<string, mixed>
      */
-    private function buildProductOutput(Product $product): array
+    private function buildProductOutput(Product $product, ServerRequestInterface $request): array
     {
         return [
             'uid' => (int)$product->getUid(),
             'title' => $product->getTitle(),
             'subtitle' => $product->getSubtitle(),
             'slug' => $product->getSlug(),
-            'price' => $product->getPrice()->getDecimalString(),
+            'price' => $this->priceProvider->getUnitPrice($product, null, 1, $request)->getDecimalString(),
             'data' => $this->toRawFieldArray($product),
         ];
     }

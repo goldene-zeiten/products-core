@@ -14,6 +14,7 @@ use GoldeneZeiten\Products\Core\Hooks\CategoryParentCycleHook;
 use GoldeneZeiten\Products\Core\Hooks\PriceAuditHook;
 use GoldeneZeiten\Products\Core\Hooks\WithdrawalPageContentHook;
 use GoldeneZeiten\Products\Core\PageTitle\ProductPageTitleProvider;
+use GoldeneZeiten\Products\Core\Routing\Aspect\CategoryPathMapper;
 use TYPO3\CMS\Core\Utility\ExtensionManagementUtility;
 use TYPO3\CMS\Extbase\Utility\ExtensionUtility;
 
@@ -29,6 +30,8 @@ defined('TYPO3') or die();
     $GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['processCmdmapClass'][] = PriceAuditHook::class;
     $GLOBALS['TYPO3_CONF_VARS']['SC_OPTIONS']['t3lib/class.t3lib_tcemain.php']['processDatamapClass'][] = WithdrawalPageContentHook::class;
 
+    $GLOBALS['TYPO3_CONF_VARS']['SYS']['routing']['aspects']['ProductsCategoryPath'] = CategoryPathMapper::class;
+
     ExtensionManagementUtility::addTypoScriptSetup(
         'config.pageTitleProviders.products.provider = ' . ProductPageTitleProvider::class . '
     config.pageTitleProviders.products.before = record'
@@ -38,7 +41,7 @@ defined('TYPO3') or die();
         'ProductsCore',
         'ProductList',
         [
-            ProductController::class => 'list, listByAjax',
+            ProductController::class => 'list',
         ],
         [],
         ExtensionUtility::PLUGIN_TYPE_CONTENT_ELEMENT
@@ -75,10 +78,10 @@ defined('TYPO3') or die();
         'ProductsCore',
         'Checkout',
         [
-            CheckoutController::class => 'address, submitAddress, shippingMethod, submitShippingMethod, payment, submitPayment, review, finalize, paymentReturn, paymentCancel, thankYou',
+            CheckoutController::class => 'address, submitAddress, shippingMethod, submitShippingMethod, payment, submitPayment, review, finalize, thankYou',
         ],
         [
-            CheckoutController::class => 'address, submitAddress, shippingMethod, submitShippingMethod, payment, submitPayment, review, finalize, paymentReturn, paymentCancel, thankYou',
+            CheckoutController::class => 'address, submitAddress, shippingMethod, submitShippingMethod, payment, submitPayment, review, finalize, thankYou',
         ],
         ExtensionUtility::PLUGIN_TYPE_CONTENT_ELEMENT
     );
@@ -146,10 +149,10 @@ defined('TYPO3') or die();
         'ProductsCore',
         'Download',
         [
-            DownloadController::class => 'list',
+            DownloadController::class => 'list, file',
         ],
         [
-            DownloadController::class => 'list',
+            DownloadController::class => 'list, file',
         ],
         ExtensionUtility::PLUGIN_TYPE_CONTENT_ELEMENT
     );

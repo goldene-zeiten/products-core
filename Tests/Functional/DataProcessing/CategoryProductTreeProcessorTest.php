@@ -7,6 +7,8 @@ namespace GoldeneZeiten\Products\Core\Tests\Functional\DataProcessing;
 use GoldeneZeiten\Products\Core\DataProcessing\CategoryProductTreeProcessor;
 use GoldeneZeiten\Products\Testing\AbstractFunctionalTestCase;
 use PHPUnit\Framework\Attributes\Test;
+use TYPO3\CMS\Core\Core\SystemEnvironmentBuilder;
+use TYPO3\CMS\Core\Http\ServerRequest;
 use TYPO3\CMS\Frontend\ContentObject\ContentObjectRenderer;
 
 final class CategoryProductTreeProcessorTest extends AbstractFunctionalTestCase
@@ -22,7 +24,7 @@ final class CategoryProductTreeProcessorTest extends AbstractFunctionalTestCase
     {
         $subject = $this->get(CategoryProductTreeProcessor::class);
 
-        $processedData = $subject->process($this->get(ContentObjectRenderer::class), [], [], ['foo' => 'bar']);
+        $processedData = $subject->process($this->contentObjectRenderer(), [], [], ['foo' => 'bar']);
 
         $this->assertSame(['foo' => 'bar'], $processedData);
     }
@@ -33,7 +35,7 @@ final class CategoryProductTreeProcessorTest extends AbstractFunctionalTestCase
         $subject = $this->get(CategoryProductTreeProcessor::class);
 
         $processedData = $subject->process(
-            $this->get(ContentObjectRenderer::class),
+            $this->contentObjectRenderer(),
             [],
             ['entryPointCategory' => 999999],
             ['foo' => 'bar']
@@ -48,7 +50,7 @@ final class CategoryProductTreeProcessorTest extends AbstractFunctionalTestCase
         $subject = $this->get(CategoryProductTreeProcessor::class);
 
         $processedData = $subject->process(
-            $this->get(ContentObjectRenderer::class),
+            $this->contentObjectRenderer(),
             [],
             ['entryPointCategory' => 6],
             []
@@ -70,7 +72,7 @@ final class CategoryProductTreeProcessorTest extends AbstractFunctionalTestCase
         $subject = $this->get(CategoryProductTreeProcessor::class);
 
         $processedData = $subject->process(
-            $this->get(ContentObjectRenderer::class),
+            $this->contentObjectRenderer(),
             [],
             ['entryPointCategory' => 6, 'as' => 'myTree'],
             []
@@ -86,7 +88,7 @@ final class CategoryProductTreeProcessorTest extends AbstractFunctionalTestCase
         $subject = $this->get(CategoryProductTreeProcessor::class);
 
         $processedData = $subject->process(
-            $this->get(ContentObjectRenderer::class),
+            $this->contentObjectRenderer(),
             [],
             ['entryPointCategory' => 1, 'levels' => 2],
             []
@@ -102,7 +104,7 @@ final class CategoryProductTreeProcessorTest extends AbstractFunctionalTestCase
         $subject = $this->get(CategoryProductTreeProcessor::class);
 
         $processedData = $subject->process(
-            $this->get(ContentObjectRenderer::class),
+            $this->contentObjectRenderer(),
             [],
             ['entryPointCategory' => 6, 'minItems' => 4],
             []
@@ -117,7 +119,7 @@ final class CategoryProductTreeProcessorTest extends AbstractFunctionalTestCase
         $subject = $this->get(CategoryProductTreeProcessor::class);
 
         $processedData = $subject->process(
-            $this->get(ContentObjectRenderer::class),
+            $this->contentObjectRenderer(),
             [],
             ['entryPointCategory' => 6, 'maxItems' => 2],
             []
@@ -138,5 +140,19 @@ final class CategoryProductTreeProcessorTest extends AbstractFunctionalTestCase
             }
         }
         $this->fail(sprintf('No child with uid %d found.', $uid));
+    }
+
+    /**
+     * The processor asks the visibility checkers and the price providers about each product, which need a
+     * request. It is not flagged as a frontend request, as Extbase would then expect the frontend TypoScript
+     * of a page.
+     */
+    private function contentObjectRenderer(): ContentObjectRenderer
+    {
+        $contentObjectRenderer = $this->get(ContentObjectRenderer::class);
+        $contentObjectRenderer->setRequest(
+            (new ServerRequest('http://localhost/'))->withAttribute('applicationType', SystemEnvironmentBuilder::REQUESTTYPE_BE)
+        );
+        return $contentObjectRenderer;
     }
 }
