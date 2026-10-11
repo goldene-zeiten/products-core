@@ -4,15 +4,18 @@ declare(strict_types=1);
 
 namespace GoldeneZeiten\Products\Core\Controller\Backend;
 
+use GoldeneZeiten\Products\Core\Backend\Exception\OrderAccessDeniedException;
+use GoldeneZeiten\Products\Core\Backend\Exception\OrderNotRefundableException;
+use GoldeneZeiten\Products\Core\Backend\Exception\OrderStatusWriteFailedException;
 use GoldeneZeiten\Products\Core\Backend\OrderDataFactory;
 use GoldeneZeiten\Products\Core\Backend\OrderDetail\OrderDetailPanelRegistry;
 use GoldeneZeiten\Products\Core\Backend\OrderListFilter;
 use GoldeneZeiten\Products\Core\Backend\OrderManagementRepository;
+use GoldeneZeiten\Products\Core\Backend\OrderRefundService;
 use GoldeneZeiten\Products\Core\Backend\OrderStatusWriter;
 use GoldeneZeiten\Products\Core\Domain\Dto\Export\ExportContext;
 use GoldeneZeiten\Products\Core\Domain\Dto\Order\OrderData;
 use GoldeneZeiten\Products\Core\Domain\Enum\OrderStatus;
-use GoldeneZeiten\Products\Core\Domain\Enum\PaymentResultState;
 use GoldeneZeiten\Products\Core\Domain\Enum\PaymentStatus;
 use GoldeneZeiten\Products\Core\Export\Exception\OrderExporterNotAvailableException;
 use GoldeneZeiten\Products\Core\Export\Exception\OrderExporterNotFoundException;
@@ -45,6 +48,7 @@ final class OrderManagementModuleController
         private readonly UriBuilder $uriBuilder,
         private readonly OrderManagementRepository $orderRepository,
         private readonly OrderStatusWriter $orderStatusWriter,
+        private readonly OrderRefundService $orderRefundService,
         private readonly OrderDataFactory $orderDataFactory,
         private readonly PaymentMethodRegistry $paymentMethodRegistry,
         private readonly OrderExportService $orderExportService,
@@ -79,7 +83,8 @@ final class OrderManagementModuleController
         ModuleTemplate $moduleTemplate
     ): ?ResponseInterface {
         $identifier = $this->stringOrNull($request->getQueryParams()['export'] ?? null);
-        $order = $identifier !== null && $orderUid > 0 ? $this->orderDataFactory->build($orderUid) : null;
+        $mayRead = $orderUid > 0 && $this->orderRepository->fetchRow($orderUid, $this->getBackendUser()) !== null;
+        $order = $identifier !== null && $mayRead ? $this->orderDataFactory->build($orderUid) : null;
         if ($identifier === null || $order === null) {
             return null;
         }
@@ -119,7 +124,7 @@ final class OrderManagementModuleController
         return [
             'mode' => 'list',
             'filter' => $filter,
-            'orders' => $this->orderRepository->fetchFiltered($filter),
+            'orders' => $this->orderRepository->fetchFiltered($filter, $this->getBackendUser()),
             'statusOptions' => OrderStatus::cases(),
             'detailUrl' => (string)$this->uriBuilder->buildUriFromRequest($request, []),
         ];
@@ -130,7 +135,7 @@ final class OrderManagementModuleController
      */
     private function buildDetailView(int $orderUid, ServerRequestInterface $request): array
     {
-        $order = $this->orderRepository->fetchRow($orderUid);
+        $order = $this->orderRepository->fetchRow($orderUid, $this->getBackendUser());
         return [
             'mode' => 'detail',
             'order' => $order,
@@ -139,7 +144,7 @@ final class OrderManagementModuleController
             'canRefund' => $order !== null && $this->canRefund($order['paymentMethod'], $order['paymentStatus']),
             'listUrl' => (string)$this->uriBuilder->buildUriFromRequest($request, ['order']),
             'orderDetailPanels' => $order !== null ? $this->orderDetailPanelRegistry->renderPanels($orderUid) : [],
-            'exporters' => $this->availableExporters($orderUid),
+            'exporters' => $order !== null ? $this->availableExporters($orderUid) : [],
         ];
     }
 
@@ -218,13 +223,20 @@ final class OrderManagementModuleController
     {
         $body = (array)$request->getParsedBody();
         $orderUid = (int)($body['orderUid'] ?? 0);
-        if ($orderUid <= 0 || $this->orderRepository->fetchRow($orderUid) === null) {
+        if ($orderUid <= 0 || $this->orderRepository->fetchRow($orderUid, $this->getBackendUser()) === null) {
             return;
         }
         try {
             $this->applyAction($orderUid, (string)($body['action'] ?? ''), $body);
             $moduleTemplate->addFlashMessage($this->translate('message.order_updated'));
-        } catch (InvalidOrderStatusTransitionException|InvalidPaymentStatusTransitionException|PaymentMethodNotFoundException $exception) {
+        } catch (
+            InvalidOrderStatusTransitionException
+            |InvalidPaymentStatusTransitionException
+            |PaymentMethodNotFoundException
+            |OrderAccessDeniedException
+            |OrderNotRefundableException
+            |OrderStatusWriteFailedException $exception
+        ) {
             $moduleTemplate->addFlashMessage($exception->getMessage(), '', ContextualFeedbackSeverity::ERROR);
         }
     }
@@ -240,7 +252,7 @@ final class OrderManagementModuleController
             return;
         }
         if ($action === 'refund') {
-            $this->applyRefund($orderUid, $backendUser);
+            $this->orderRefundService->refund($orderUid, $backendUser);
             return;
         }
         if ($action === 'transition') {
@@ -248,22 +260,6 @@ final class OrderManagementModuleController
             if ($target !== null) {
                 $this->orderStatusWriter->changeStatus($orderUid, $target, null, $backendUser);
             }
-        }
-    }
-
-    private function applyRefund(int $orderUid, BackendUserAuthentication $backendUser): void
-    {
-        $order = $this->orderDataFactory->build($orderUid);
-        if ($order === null) {
-            return;
-        }
-        $paymentMethod = $this->paymentMethodRegistry->get($order->paymentMethod);
-        if (!$paymentMethod instanceof RefundablePaymentMethodInterface) {
-            return;
-        }
-        $result = $paymentMethod->refund($order, $order->totalGross);
-        if ($result->getState() === PaymentResultState::COMPLETED) {
-            $this->orderStatusWriter->changePaymentStatus($orderUid, PaymentStatus::REFUNDED, $backendUser);
         }
     }
 
