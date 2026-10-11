@@ -48,7 +48,9 @@ final class DiscountRegistry
                 $context->getGoodsTotal(),
                 $context->getFrontendUserUid(),
                 $context->getRequest(),
-                $accumulated
+                $accumulated,
+                $context->getGoodsVatBuckets(),
+                $context->isGoodsAlreadyDiscounted()
             );
             foreach ($provider->quote($contextForProvider) as $adjustment) {
                 $collected[] = $adjustment;

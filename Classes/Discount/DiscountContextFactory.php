@@ -7,6 +7,8 @@ namespace GoldeneZeiten\Products\Core\Discount;
 use GoldeneZeiten\Products\Core\Domain\Dto\BasketViewModel;
 use GoldeneZeiten\Products\Core\Domain\Dto\Discount\DiscountContext;
 use GoldeneZeiten\Products\Core\Domain\ValueObject\AdjustmentCollection;
+use GoldeneZeiten\Products\Core\Domain\ValueObject\VatBuckets;
+use GoldeneZeiten\Products\Core\Service\Basket\BasketService;
 use Psr\Http\Message\ServerRequestInterface;
 
 /**
@@ -16,6 +18,10 @@ use Psr\Http\Message\ServerRequestInterface;
  */
 final class DiscountContextFactory
 {
+    public function __construct(
+        private readonly BasketService $basketService
+    ) {}
+
     public function createFromBasket(
         BasketViewModel $basketViewModel,
         int $frontendUserUid,
@@ -26,7 +32,9 @@ final class DiscountContextFactory
             $basketViewModel->getTotalGross(),
             $frontendUserUid,
             $request,
-            $accumulatedAdjustments
+            $accumulatedAdjustments,
+            VatBuckets::fromBasket($basketViewModel),
+            $this->basketService->isAlreadyDiscounted($request, $basketViewModel)
         );
     }
 }

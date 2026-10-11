@@ -40,7 +40,8 @@ interface LoyaltyProviderInterface
 
     /**
      * What the requested spend is worth against this order, as a loyalty adjustment. Null when the
-     * customer spends nothing here.
+     * customer spends nothing here. Its tax rate does not matter: the registry splits the amount across
+     * the goods' VAT rates, as a redemption pays for the goods.
      */
     public function quoteRedemption(LoyaltyContext $context): ?CheckoutAdjustment;
 
@@ -51,7 +52,8 @@ interface LoyaltyProviderInterface
     public function applyRedemption(Order $order, LoyaltyContext $context): void;
 
     /**
-     * Credit what the order earned. Runs once the order exists.
+     * Credit what the order earned. Runs once the order exists. The context's remaining goods total is
+     * what the goods cost the customer after every discount and redemption.
      */
     public function award(Order $order, LoyaltyContext $context): void;
 }
