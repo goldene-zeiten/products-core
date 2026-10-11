@@ -21,8 +21,9 @@ use Psr\Http\Message\ServerRequestInterface;
  * the payment actually succeeded is decided by the payment method, which is expected to verify the
  * callback against the gateway rather than believe what the caller claims.
  *
- * Both are also replayable: a customer can reload the return page and a gateway can retry its webhook,
- * so finalization is idempotent {@see OrderFinalizationService::finalize()}.
+ * Both are also replayable and race each other: a customer can reload the return page, a gateway can retry
+ * its webhook, and the two can arrive at once - finalization is idempotent and atomic
+ * {@see OrderFinalizationService::finalize()}.
  */
 final class PaymentCallbackService
 {
@@ -48,6 +49,18 @@ final class PaymentCallbackService
         return $paymentResult;
     }
 
+    /**
+     * The customer abandoned the payment at the gateway, so the order is cancelled and its stock returned;
+     * the basket stays for another attempt. An order the gateway has meanwhile reported as paid is left alone.
+     */
+    public function handleCancel(int $orderUid, string $token): Order
+    {
+        $order = $this->resolveOrder($orderUid, $token);
+        $this->orderFinalizationService->reject($order, 'Payment cancelled at the gateway.');
+
+        return $order;
+    }
+
     public function handleWebhook(int $orderUid, string $token, ServerRequestInterface $request): PaymentResult
     {
         $order = $this->resolveOrder($orderUid, $token);
@@ -60,11 +73,14 @@ final class PaymentCallbackService
     /**
      * A gateway with a single dashboard-configured webhook (Stripe, PayPal) cannot carry a per-order token,
      * so the method verifies the gateway's signature and resolves the order from the verified payload; only
-     * a resolved order is finalized.
+     * a resolved order is finalized. A verified event the method ignores is acknowledged without any change.
      */
     public function handleStaticWebhook(string $gateway, ServerRequestInterface $request): PaymentResult
     {
         $resolution = $this->staticWebhookMethodFor($gateway)->handleStaticWebhook($request);
+        if ($resolution->isIgnored()) {
+            return $resolution->getResult();
+        }
         $order = $resolution->getOrder();
         if ($order === null) {
             throw new PaymentCallbackException(
