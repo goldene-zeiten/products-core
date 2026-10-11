@@ -131,6 +131,10 @@
 				<source>Refund</source>
 				<target>Erstatten</target>
 			</trans-unit>
+			<trans-unit id="order.action.complete_refund" resname="order.action.complete_refund">
+				<source>Complete refund</source>
+				<target>Rückerstattung abschließen</target>
+			</trans-unit>
 			<trans-unit id="order.export.title" resname="order.export.title">
 				<source>Export order</source>
 				<target>Bestellung exportieren</target>
@@ -198,6 +202,10 @@
 			<trans-unit id="message.no_records" resname="message.no_records">
 				<source>No records found.</source>
 				<target>Keine Datensätze gefunden.</target>
+			</trans-unit>
+			<trans-unit id="message.no_storage_folder" resname="message.no_storage_folder">
+				<source>No storage folder found. Records cannot be created until one is configured.</source>
+				<target>Es wurde kein Speicherordner gefunden. Datensätze können erst angelegt werden, wenn einer konfiguriert ist.</target>
 			</trans-unit>
 			<trans-unit id="tree.tree_label" resname="tree.tree_label">
 				<source>Categories and products</source>
