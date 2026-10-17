@@ -79,6 +79,18 @@ Configuration`, tab :guilabel:`migration`) before running the product and articl
     Columns of :confval:`upgrading-column-categories` holding several values, separated by commas,
     semicolons or line breaks.
 
+..  confval:: migration.articleAttributeColumns
+    :name: upgrading-article-attribute-columns
+    :type: string
+    :Default: (empty)
+
+    Columns of ``tt_products_articles`` that told the articles of a product apart, as ``column:Title``
+    pairs, e.g. ``material:Material``. The wizard :guilabel:`Turn tt_products article columns into
+    attributes` (``products_ttProductsArticleAttributes``, after the article migration) creates an
+    attribute per column with a value per distinct entry and links every migrated article to its value,
+    so the article switch on the product page can offer them. The configured columns are no longer
+    reported as unmigrated by the article wizard.
+
 ..  confval:: migration.note2AsKeywords
     :name: upgrading-note2-as-keywords
     :type: bool
@@ -167,9 +179,16 @@ Run the wizards in this order — each one links its rows back to the previous o
     ``template_suffix`` …) and a starting point (:sql:`tt_content.pages`) whose folder did not
     become a category. A starting point whose folder did become a category is migrated into the
     element's category selection. A list restricted that
-    way shows the whole catalog afterwards until it is rebuilt, typically as a category selection. A
-    ``pid_list`` set in TypoScript is not visible to the wizard at all; check the extension templates
-    of the list pages yourself.
+    way shows the whole catalog afterwards until it is rebuilt, typically as a category selection.
+
+    The wizard also reads the TypoScript templates (:sql:`sys_template`) of the element's page and
+    the pages above it, merged from the root down: the folders of ``plugin.tt_products.pid_list``
+    become the categories of an element without a starting point of its own, and
+    ``conf.tt_products.ALL.limit`` and ``conf.tt_products.ALL.orderBy`` (or ``limit`` and ``orderBy``
+    directly below ``plugin.tt_products``) become the list's page size and sorting - ``title``,
+    ``price``, ``price desc``, ``crdate desc``; ``uid`` keeps the default order. ``pid_list``
+    folders without a category and other orders are reported. Constants and conditions are not
+    evaluated.
 
     ..  warning::
         Run this wizard **before upgrading the site to TYPO3 v14.** TYPO3 v14 removes the

@@ -41,6 +41,7 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
      */
     private const HANDLED_COLUMNS = [
         'title',
+        'slug',
         'itemnumber',
         'price',
         'price2',
@@ -68,6 +69,7 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
         private readonly LegacyArticleProductResolver $articleProductResolver,
         private readonly LegacyPriceMigrator $priceMigrator,
         private readonly LegacyColumnReporter $columnReporter,
+        private readonly LegacyMigrationConfiguration $migrationConfiguration,
     ) {}
 
     public function setOutput(OutputInterface $output): void
@@ -117,7 +119,11 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
             }
         }
         $this->overlayMigrator->migrate($this->output, $this->overlayConfig(), $this->overlayValues(...));
-        $this->columnReporter->report(self::LEGACY_TABLE, self::HANDLED_COLUMNS, $this->output);
+        $this->columnReporter->report(
+            self::LEGACY_TABLE,
+            [...self::HANDLED_COLUMNS, ...array_keys($this->migrationConfiguration->getArticleAttributeColumns())],
+            $this->output
+        );
         return true;
     }
 
@@ -199,6 +205,7 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
             'sys_language_uid' => 0,
             'product' => $productLocalUid,
             'title' => (string)$legacyRow['title'],
+            'slug' => (string)($legacyRow['slug'] ?? ''),
             'item_number' => (string)$legacyRow['itemnumber'],
             'price' => $this->priceMigrator->price($legacyRow),
             'in_stock' => (int)$legacyRow['inStock'],
