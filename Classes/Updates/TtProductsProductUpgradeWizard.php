@@ -35,6 +35,43 @@ final class TtProductsProductUpgradeWizard implements UpgradeWizardInterface, Ch
     private const LOCAL_CATEGORY_MM_TABLE = 'tx_products_product_category_mm';
     private const LOCAL_TAXCLASS_TABLE = 'tx_products_domain_model_taxclass';
 
+    /**
+     * Migrated here, by the media wizard (`image`, `datasheet`, `download_uid`) or by the article
+     * wizard (`article_uid`); `smallimage` is reported by the media wizard.
+     *
+     * @var string[]
+     */
+    private const HANDLED_COLUMNS = [
+        'title',
+        'subtitle',
+        'slug',
+        'note',
+        'keyword',
+        'itemnumber',
+        'ean',
+        'price',
+        'price2',
+        'directcost',
+        'deposit',
+        'taxcat_id',
+        'inStock',
+        'basketminquantity',
+        'basketmaxquantity',
+        'weight',
+        'bulkily',
+        'offer',
+        'highlight',
+        'category',
+        'article_uid',
+        'image',
+        'image_uid',
+        'smallimage',
+        'smallimage_uid',
+        'datasheet',
+        'datasheet_uid',
+        'download_uid',
+    ];
+
     private OutputInterface $output;
 
     public function __construct(
@@ -43,6 +80,9 @@ final class TtProductsProductUpgradeWizard implements UpgradeWizardInterface, Ch
         private readonly LegacyOverlayMigrator $overlayMigrator,
         private readonly StorageFolderResolver $storageFolderResolver,
         private readonly CategoryMigrationPrerequisite $categoryMigrationPrerequisite,
+        private readonly LegacyPriceMigrator $priceMigrator,
+        private readonly LegacyColumnReporter $columnReporter,
+        private readonly LegacyMigrationConfiguration $migrationConfiguration,
     ) {}
 
     public function setOutput(OutputInterface $output): void
@@ -82,6 +122,9 @@ final class TtProductsProductUpgradeWizard implements UpgradeWizardInterface, Ch
             );
             return false;
         }
+        if (!$this->priceMigrator->prepare(self::LEGACY_TABLE, $this->output)) {
+            return false;
+        }
         $pid = $this->storageFolderResolver->resolve();
         while (($rows = $this->migrationHelper->fetchUnmigratedBatch(self::LEGACY_TABLE, self::LOCAL_TABLE)) !== []) {
             foreach ($rows as $row) {
@@ -89,6 +132,15 @@ final class TtProductsProductUpgradeWizard implements UpgradeWizardInterface, Ch
             }
         }
         $this->overlayMigrator->migrate($this->output, $this->overlayConfig(), $this->overlayValues(...));
+        $this->columnReporter->report(
+            self::LEGACY_TABLE,
+            [
+                ...self::HANDLED_COLUMNS,
+                ...array_keys($this->migrationConfiguration->getColumnCategories()),
+                ...($this->migrationConfiguration->getBool('note2AsKeywords') ? ['note2'] : []),
+            ],
+            $this->output
+        );
         return true;
     }
 
@@ -121,6 +173,7 @@ final class TtProductsProductUpgradeWizard implements UpgradeWizardInterface, Ch
         $queryBuilder->insert(self::LOCAL_TABLE)->values($this->productValues($legacyRow, $pid, $legacyUid))->executeStatement();
         $localUid = (int)$this->connectionPool->getConnectionForTable(self::LOCAL_TABLE)->lastInsertId();
         $this->migrationHelper->recordMapping(self::LEGACY_TABLE, $legacyUid, self::LOCAL_TABLE, $localUid);
+        $this->priceMigrator->migrateResellerPrice($legacyRow, 'product', $localUid, $pid);
         $this->linkCategory($legacyUid, (int)($legacyRow['category'] ?? 0), $localUid);
     }
 
@@ -137,23 +190,37 @@ final class TtProductsProductUpgradeWizard implements UpgradeWizardInterface, Ch
             'title' => (string)$legacyRow['title'],
             'subtitle' => (string)($legacyRow['subtitle'] ?? ''),
             'slug' => (string)($legacyRow['slug'] ?? ''),
-            'description' => (string)($legacyRow['description'] ?? ''),
+            'description' => (string)($legacyRow['note'] ?? ''),
+            'keywords' => $this->keywords($legacyRow),
             'item_number' => (string)$legacyRow['itemnumber'],
             'ean' => (string)$legacyRow['ean'],
-            'price' => $this->formatPrice((string)$legacyRow['price']),
+            'price' => $this->priceMigrator->price($legacyRow),
+            'direct_cost' => number_format((float)($legacyRow['directcost'] ?? 0), 2, '.', ''),
+            'deposit' => number_format((float)($legacyRow['deposit'] ?? 0), 2, '.', ''),
             'tax_class' => $this->resolveTaxClass($legacyUid, (int)($legacyRow['taxcat_id'] ?? 0)),
             'in_stock' => (int)$legacyRow['inStock'],
             'basket_min_quantity' => (int)round((float)$legacyRow['basketminquantity']),
             'basket_max_quantity' => (int)round((float)$legacyRow['basketmaxquantity']),
             'weight' => (int)round((float)$legacyRow['weight']),
+            'bulky' => (int)($legacyRow['bulkily'] ?? 0) > 0 ? 1 : 0,
             'is_offer' => (int)$legacyRow['offer'] > 0 ? 1 : 0,
             'is_highlight' => (int)$legacyRow['highlight'] > 0 ? 1 : 0,
         ];
     }
 
-    private function formatPrice(string $legacyPrice): string
+    /**
+     * tt_products keeps keywords in `keyword`; some shops used `note2` for them instead, declared with
+     * `migration.note2AsKeywords`.
+     *
+     * @param array<string, mixed> $legacyRow
+     */
+    private function keywords(array $legacyRow): string
     {
-        return number_format((float)$legacyPrice, 2, '.', '');
+        $keywords = trim((string)($legacyRow['keyword'] ?? ''));
+        if ($keywords === '' && $this->migrationConfiguration->getBool('note2AsKeywords')) {
+            $keywords = trim((string)($legacyRow['note2'] ?? ''));
+        }
+        return $keywords;
     }
 
     /**

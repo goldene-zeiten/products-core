@@ -5,7 +5,10 @@ declare(strict_types=1);
 namespace GoldeneZeiten\Products\Core\Updates;
 
 use GoldeneZeiten\Products\Core\Updates\Prerequisites\CategoryMigrationPrerequisite;
+use GoldeneZeiten\Products\Core\Updates\Prerequisites\ColumnCategoryPrerequisite;
 use GoldeneZeiten\Products\Core\Updates\Prerequisites\ProductMigrationPrerequisite;
+use GoldeneZeiten\Products\Core\Updates\Prerequisites\StorageFolderCategoryPrerequisite;
+use Symfony\Component\Console\Formatter\OutputFormatter;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\DependencyInjection\Attribute\Autoconfigure;
 use TYPO3\CMS\Core\Database\Connection;
@@ -44,6 +47,7 @@ final class TtProductsPluginUpgradeWizard implements UpgradeWizardInterface, Cha
     private const LOCAL_CATEGORY_TABLE = 'tx_products_domain_model_category';
     private const PRODUCT_SELECTION_CTYPES = ['productscore_productlist'];
     private const CATEGORY_SELECTION_CTYPES = ['productscore_productlist', 'productscore_categorylist'];
+    private const MIGRATED_FLEXFORM_FIELDS = ['display_mode', 'productSelection', 'categorySelection', 'fields'];
 
     private OutputInterface $output;
 
@@ -53,6 +57,10 @@ final class TtProductsPluginUpgradeWizard implements UpgradeWizardInterface, Cha
         private readonly LegacyPluginModeMap $modeMap,
         private readonly ProductMigrationPrerequisite $productMigrationPrerequisite,
         private readonly CategoryMigrationPrerequisite $categoryMigrationPrerequisite,
+        private readonly StorageFolderCategoryPrerequisite $storageFolderCategoryPrerequisite,
+        private readonly ColumnCategoryPrerequisite $columnCategoryPrerequisite,
+        private readonly LegacyMigrationConfiguration $migrationConfiguration,
+        private readonly LegacyColumnCategories $columnCategories,
     ) {}
 
     public function setOutput(OutputInterface $output): void
@@ -118,24 +126,28 @@ final class TtProductsPluginUpgradeWizard implements UpgradeWizardInterface, Cha
             DatabaseUpdatedPrerequisite::class,
             CategoryMigrationPrerequisite::class,
             ProductMigrationPrerequisite::class,
+            StorageFolderCategoryPrerequisite::class,
+            ColumnCategoryPrerequisite::class,
         ];
     }
 
     private function prerequisitesFulfilled(): bool
     {
-        if (!$this->productMigrationPrerequisite->isFulfilled()) {
-            $this->output->writeln(
-                '<error>tt_products still has unmigrated rows; run the product migration '
-                    . 'wizard (products_ttProductsProductMigration) first.</error>'
-            );
-            return false;
-        }
-        if (!$this->categoryMigrationPrerequisite->isFulfilled()) {
-            $this->output->writeln(
-                '<error>tt_products_cat still has unmigrated rows; run the category migration '
-                    . 'wizard (products_ttProductsCategoryMigration) first.</error>'
-            );
-            return false;
+        $checks = [
+            'tt_products still has unmigrated rows; run the product migration wizard (products_ttProductsProductMigration) first.'
+                => $this->productMigrationPrerequisite,
+            'tt_products_cat still has unmigrated rows; run the category migration wizard (products_ttProductsCategoryMigration) first.'
+                => $this->categoryMigrationPrerequisite,
+            'The storage folders are not turned into categories yet; run the storage folder category wizard (products_ttProductsStorageFolderCategories) first.'
+                => $this->storageFolderCategoryPrerequisite,
+            'The grouping columns are not turned into categories yet; run the column category wizard (products_ttProductsColumnCategories) first.'
+                => $this->columnCategoryPrerequisite,
+        ];
+        foreach ($checks as $message => $prerequisite) {
+            if (!$prerequisite->isFulfilled()) {
+                $this->output->writeln('<error>' . $message . '</error>');
+                return false;
+            }
         }
         return true;
     }
@@ -210,6 +222,7 @@ final class TtProductsPluginUpgradeWizard implements UpgradeWizardInterface, Cha
             $this->reportUntouched($row);
             return [];
         }
+        $this->reportDroppedSettings($row);
         $selections = $this->resolveSelections($row);
         $parts = [];
         foreach ($targets as $sortingOffset => $target) {
@@ -302,15 +315,66 @@ final class TtProductsPluginUpgradeWizard implements UpgradeWizardInterface, Cha
         if ($products !== '') {
             $selections['records'] = $products;
         }
-        $categories = $this->remapUids(
-            (string)($flexForm['categorySelection'] ?? ''),
-            self::LEGACY_CATEGORY_TABLE,
-            self::LOCAL_CATEGORY_TABLE
-        );
-        if ($categories !== '') {
-            $selections['tx_products_category'] = $categories;
+        $categories = array_filter(array_unique(array_merge(
+            explode(',', $this->remapUids((string)($flexForm['categorySelection'] ?? ''), self::LEGACY_CATEGORY_TABLE, self::LOCAL_CATEGORY_TABLE)),
+            array_values($this->startingPointCategories($row)),
+            $this->productWhereCategories((string)($flexForm['product_where'] ?? '')) ?? []
+        )));
+        if ($categories !== []) {
+            $selections['tx_products_category'] = implode(',', $categories);
         }
         return $selections;
+    }
+
+    /**
+     * The categories a product_where filter selects when it only matches values of columns that became
+     * categories - `quality LIKE '%White gold%'`, alternatives joined by OR. Null for anything else.
+     *
+     * @return string[]|null
+     */
+    private function productWhereCategories(string $productWhere): ?array
+    {
+        $columns = $this->migrationConfiguration->getColumnCategories();
+        if (trim($productWhere) === '' || $columns === []) {
+            return null;
+        }
+        $categories = [];
+        foreach (preg_split('/\s+OR\s+/i', trim($productWhere)) ?: [] as $condition) {
+            $matched = preg_match('/^\(?\s*`?([a-z0-9_]+)`?\s+(?:LIKE|=)\s+([\'"])%?([^%\'"]+)%?\2\s*\)?$/i', trim($condition), $parts);
+            $categoryUid = $matched === 1 && isset($columns[$parts[1]]) ? $this->columnCategories->findValueCategory($parts[1], trim($parts[3])) : null;
+            if ($categoryUid === null) {
+                return null;
+            }
+            $categories[] = (string)$categoryUid;
+        }
+        return $categories;
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     * @return int[] the page uids of the element's starting point
+     */
+    private function startingPoints(array $row): array
+    {
+        return array_values(array_filter(array_map('intval', explode(',', (string)($row['pages'] ?? '')))));
+    }
+
+    /**
+     * The categories the storage folder wizard created for the element's starting point.
+     *
+     * @param array<string, mixed> $row
+     * @return array<int, string> page uid => category uid
+     */
+    private function startingPointCategories(array $row): array
+    {
+        $categories = [];
+        foreach ($this->startingPoints($row) as $pageUid) {
+            $categoryUid = $this->migrationHelper->resolveLocalUid('pages', $pageUid, self::LOCAL_CATEGORY_TABLE);
+            if ($categoryUid !== null && $categoryUid > 0) {
+                $categories[$pageUid] = (string)$categoryUid;
+            }
+        }
+        return $categories;
     }
 
     /**
@@ -439,6 +503,42 @@ final class TtProductsPluginUpgradeWizard implements UpgradeWizardInterface, Cha
             $this->pageTitle((int)$row['pid']),
             (string)$row['list_type'],
             $modes === [] ? '(none selected)' : implode(', ', $modes)
+        ));
+    }
+
+    /**
+     * Lists FlexForm fields and the starting point (`pages`, the legacy `pid_list`) the new element
+     * does not take over, so the integrator can rebuild a filtered list, e.g. as a category selection.
+     *
+     * @param array<string, mixed> $row
+     */
+    private function reportDroppedSettings(array $row): void
+    {
+        $flexForm = $this->parseFlexForm($row);
+        $dropped = array_diff_key(
+            array_filter($flexForm, static fn(string $value): bool => trim($value) !== ''),
+            array_flip(self::MIGRATED_FLEXFORM_FIELDS)
+        );
+        if ($this->productWhereCategories((string)($flexForm['product_where'] ?? '')) !== null) {
+            unset($dropped['product_where']);
+        }
+        $unmappedStartingPoints = array_diff($this->startingPoints($row), array_keys($this->startingPointCategories($row)));
+        if ($unmappedStartingPoints !== []) {
+            $dropped['pages'] = implode(',', $unmappedStartingPoints);
+        }
+        if ($dropped === []) {
+            return;
+        }
+        $settings = [];
+        foreach ($dropped as $field => $value) {
+            $settings[] = sprintf('%s = "%s"', $field, OutputFormatter::escape($value));
+        }
+        $this->output->writeln(sprintf(
+            '<comment>tt_content uid %d on page %d ("%s") was migrated without these legacy settings: %s</comment>',
+            (int)$row['uid'],
+            (int)$row['pid'],
+            $this->pageTitle((int)$row['pid']),
+            implode(', ', $settings)
         ));
     }
 

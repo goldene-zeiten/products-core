@@ -31,8 +31,8 @@ calling :php:`isAvailable()` on each, then sorts by :php:`getPriority()` (highes
 The result is dispatched to :php:`PaymentMethodsCollectedEvent` so listeners can reorder or
 hide methods. The customer sees only the methods that passed the availability check.
 
-**3. Fee** — Each available method may declare a surcharge via :php:`calculateFee()`, returned
-in cents. This surcharge is added as a :php:`PAYMENT_FEE` :php:`CheckoutAdjustment` (see the
+**3. Fee** — Each available method may declare a surcharge, or a discount as a negative value,
+via :php:`calculateFee()`, returned in cents. This surcharge is added as a :php:`PAYMENT_FEE` :php:`CheckoutAdjustment` (see the
 :ref:`Checkout Adjustments API <developer-api-checkout-adjustments>`) and is applied **last**,
 after discounts and other adjustments. This means the fee is calculated on what the customer
 actually owes after discounts.
@@ -86,7 +86,12 @@ Interface Contract
 :php:`calculateFee(PaymentContext $context): int`
     **Discovery phase:** Return the surcharge for this method in cents (e.g., :code:`299`
     for a 2.99 EUR credit card fee). The fee is added as a :php:`PAYMENT_FEE` adjustment
-    during order creation and is applied after discounts. Return :code:`0` for no fee.
+    during order creation and is applied after discounts, at the VAT rate of the shipping.
+    Return :code:`0` for no fee.
+
+    A **negative** value grants a discount for paying this way, e.g. 3 % for cash. It lowers the
+    price of the goods, so it is added as a :php:`DISCOUNT` adjustment split across the goods'
+    VAT rates, like a discount voucher.
 
 :php:`initiate(Order $order, PaymentContext $context): PaymentResult`
     **Execution phase:** Start the payment for this order. Return one of the :php:`PaymentResult`
@@ -127,6 +132,14 @@ It carries:
     Always set (does not require a checkout page); this is a fixed middleware path, not a
     plugin action. Also signed per order.
 
+:php:`getShippingOptionKey(): string`
+    The shipping option chosen for the order, e.g. :code:`'tablerate:12'` or :code:`'pickup:3'`;
+    empty when nothing ships or no option was chosen yet. Lets a method depend on the delivery,
+    e.g. cash only when the order is collected in store, or no cash on delivery then.
+
+:php:`getShippingProviderIdentifier(): string`
+    The provider part of :php:`getShippingOptionKey()`, e.g. :code:`'pickup'`.
+
 PaymentResult
 ==============
 
@@ -157,6 +170,29 @@ An immutable value object returned by :php:`initiate()`, :php:`handleReturn()`, 
     (e.g., :code:`'Insufficient funds'`). The order transitions to :php:`PaymentStatus::FAILED`.
     Return this if the gateway rejects the payment synchronously, or if you detect a problem
     before contacting the gateway.
+
+Payment Instructions in the Order Mails
+=======================================
+
+A method whose customer still has to act after placing the order — prepayment, for example —
+additionally implements :php:`PaymentInstructionsProviderInterface`. The confirmation and merchant
+mails show the returned plain text below the payment method; an empty string shows nothing.
+
+..  code-block:: php
+
+    final class PrepaymentMethod implements PaymentMethodInterface, PaymentInstructionsProviderInterface
+    {
+        // ... PaymentMethodInterface methods
+
+        public function getPaymentInstructions(Order $order): string
+        {
+            return sprintf(
+                "Please transfer the total to IBAN %s, reference %s.",
+                $this->iban,
+                $order->getOrderNumber()
+            );
+        }
+    }
 
 Registration
 ============

@@ -15,6 +15,106 @@ themselves entirely once the legacy tables are gone.
 ..  contents:: Table of contents
     :local:
 
+Before you start
+================
+
+Some legacy behaviour lives in TypoScript (:sql:`sys_template`), which the wizards cannot read. Declare
+it in the extension configuration of ``products_core`` (:guilabel:`Admin Tools > Settings > Extension
+Configuration`, tab :guilabel:`migration`) before running the product and article wizards:
+
+..  confval:: migration.legacyPrice2
+    :name: upgrading-legacy-price2
+    :type: options
+    :default: undecided
+
+    How the legacy shop used the ``price2`` column of products and articles. ``tt_products`` charges it
+    whenever ``plugin.tt_products.priceNoReseller = 2`` is set, falling back to ``price`` where
+    ``price2`` is empty.
+
+    ``selling``
+        ``priceNoReseller = 2`` was set for every visitor: ``price2`` becomes the price, ``price`` is
+        used only where ``price2`` is empty.
+    ``reseller``
+        ``priceNoReseller = 2`` was set inside a usergroup condition: ``price`` stays the price, and
+        ``price2`` becomes a price period of the frontend group set in
+        :confval:`upgrading-legacy-price2-fe-group`, without start or end date.
+    ``unused``
+        ``price2`` is ignored; the wizards report how many records carried one.
+    ``undecided``
+        The product and article wizards refuse to run while any record has a ``price2``.
+
+..  confval:: migration.legacyPrice2FeGroup
+    :name: upgrading-legacy-price2-fe-group
+    :type: int
+    :default: 0
+
+    Frontend group uid the ``price2`` price period applies to. Required when
+    :confval:`upgrading-legacy-price2` is ``reseller``.
+
+..  confval:: migration.storageFolderCategories
+    :name: upgrading-storage-folder-categories
+    :type: bool
+    :Default: false
+
+    For a legacy catalog grouped by storage folders rather than :sql:`tt_products_cat`. Enables
+    the storage folder category wizard (see the run order) and makes the plugin wizard turn a
+    legacy element's starting point into a selection of those categories.
+
+..  confval:: migration.columnCategories
+    :name: upgrading-column-categories
+    :type: string
+    :Default: (empty)
+
+    Comma-separated ``column:Title`` pairs of ``tt_products`` columns the legacy shop grouped
+    products by, e.g. ``form:Hersteller, quality:Filter``. Each column becomes a root category
+    ``Title`` with one child per distinct value (the first spelling wins, regardless of case), and
+    the plugin wizard turns a ``product_where`` filter like ``quality LIKE '%Weißgold%'`` - plain
+    ``LIKE``/``=`` matches joined by ``OR`` - into a selection of those categories.
+
+..  confval:: migration.columnCategoriesMultiValue
+    :name: upgrading-column-categories-multi-value
+    :type: string
+    :Default: (empty)
+
+    Columns of :confval:`upgrading-column-categories` holding several values, separated by commas,
+    semicolons or line breaks.
+
+..  confval:: migration.note2AsKeywords
+    :name: upgrading-note2-as-keywords
+    :type: bool
+    :Default: false
+
+    The legacy shop used ``note2`` for meta keywords. The product wizard then takes it as the
+    product's keywords where ``tt_products.keyword`` is empty, which it always migrates.
+
+..  confval:: migration.orderPaymentMethods
+    :name: upgrading-order-payment-methods
+    :type: string
+    :Default: (empty)
+
+    Maps the TypoScript keys of ``plugin.tt_products.payment`` to payment methods for the order
+    migration, e.g. ``10:cashondelivery, 20:prepayment, 30:cash, 40:invoice, 90:paypal``. tt_products
+    stores the key as the leading number of an order's ``payment`` text (``90: PayPal Gateway``).
+    Orders with an unmapped key become ``invoice`` and are reported.
+
+..  confval:: migration.orderShippingOptions
+    :name: upgrading-order-shipping-options
+    :type: string
+    :Default: (empty)
+
+    Maps the TypoScript keys of ``plugin.tt_products.shipping`` to a shipping provider and, optionally,
+    an option, e.g. ``10:tablerate:1, 20:pickup``. The legacy shipping title becomes the order's
+    shipping label. tt_products stores no pick-up branch, so ``pickup`` orders get none.
+
+The order migration skips abandoned checkouts - rows tt_products created when a checkout started that
+have no customer, no amount and no payment - and reports them.
+
+The same values can be set on the command line, for example:
+
+..  code-block:: bash
+
+    vendor/bin/typo3 configuration:set EXTENSIONS/products_core/migration/legacyPrice2 selling
+
 Run order
 =========
 
@@ -28,7 +128,20 @@ Run the wizards in this order — each one links its rows back to the previous o
 #.  **Migrate products** (``products_ttProductsProductMigration``) — ``tt_products`` and its
     ``tt_products_language`` translations, linked to the migrated categories and tax classes.
 #.  **Migrate articles** (``products_ttProductsArticleMigration``) — ``tt_products_articles`` and
-    its ``tt_products_articles_language`` translations, linked to the migrated products.
+    its ``tt_products_articles_language`` translations, linked to the migrated products. The product
+    is read from ``uid_product`` and from :sql:`tt_products_products_mm_articles`, so every legacy
+    article mode is covered. An article related to several products belongs to the first of them
+    afterwards; the wizard reports every further product, whose variant has to be recreated by hand.
+#.  **Turn storage folders into categories** (``products_ttProductsStorageFolderCategories``,
+    only with :confval:`upgrading-storage-folder-categories`) — creates a category for every storage
+    folder holding ``tt_products`` records, titled and slugged like the folder and nested like the
+    folders up to the first page that is not a folder, and assigns every migrated product to the
+    category of its folder. Run it after the product wizard and before the plugin wizard, which
+    waits for it.
+#.  **Turn grouping columns into categories** (``products_ttProductsColumnCategories``, only with
+    :confval:`upgrading-column-categories`) — builds the category trees of the configured columns
+    and assigns the migrated products. Run it after the product wizard and before the plugin
+    wizard, which waits for it.
 #.  **Migrate orders** (``products_ttProductsOrderMigration``) — ``sys_products_orders`` and its
     line items, linked to the migrated products/articles.
 #.  **Migrate media** (``products_ttProductsMediaMigration``) — product/category/article images and
@@ -49,6 +162,15 @@ Run the wizards in this order — each one links its rows back to the previous o
     vouchers, the DAM and address-book families, the ``USER1``-``USER5`` hook slots) are left
     completely untouched and reported with their uid and page, for manual review.
 
+    Legacy settings the new elements have no equivalent for are reported per migrated element:
+    every non-empty FlexForm field besides the mode and the selections (``product_where``, ``myTS``,
+    ``template_suffix`` …) and a starting point (:sql:`tt_content.pages`) whose folder did not
+    become a category. A starting point whose folder did become a category is migrated into the
+    element's category selection. A list restricted that
+    way shows the whole catalog afterwards until it is rebuilt, typically as a category selection. A
+    ``pid_list`` set in TypoScript is not visible to the wizard at all; check the extension templates
+    of the list pages yourself.
+
     ..  warning::
         Run this wizard **before upgrading the site to TYPO3 v14.** TYPO3 v14 removes the
         :sql:`tt_content.list_type` column, and legacy ``tt_products`` never registered its
@@ -66,6 +188,13 @@ Run the wizards in this order — each one links its rows back to the previous o
 
 Known limitations
 ==================
+
+*   **Variant, tag and free-text columns are not migrated, but reported.** The product text comes
+    from ``note``, the purchase price from ``directcost``; the variant columns (``color``, ``size``,
+    ``description``, ``material`` …), ``note2``, ``quality``, ``form`` and every other column
+    carrying data without a counterpart here are listed by the product and article wizards with the
+    number of affected records. Review that output before running the cleanup wizard, which drops
+    the columns with their tables.
 
 *   **Secondary thumbnails and slider images are not migrated.** Legacy ``smallimage`` (products,
     articles) and ``sliderimage`` (categories) are redundant pre-generated thumbnails of the main

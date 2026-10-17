@@ -34,6 +34,29 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
     private const LOCAL_TABLE = 'tx_products_domain_model_article';
     private const LOCAL_PRODUCT_TABLE = 'tx_products_domain_model_product';
 
+    /**
+     * Migrated here or by the media wizard (`image`); `smallimage` is reported by the media wizard.
+     *
+     * @var string[]
+     */
+    private const HANDLED_COLUMNS = [
+        'title',
+        'itemnumber',
+        'price',
+        'price2',
+        'inStock',
+        'basketminquantity',
+        'basketmaxquantity',
+        'weight',
+        'uid_product',
+        'config',
+        'config_type',
+        'image',
+        'image_uid',
+        'smallimage',
+        'smallimage_uid',
+    ];
+
     private OutputInterface $output;
 
     public function __construct(
@@ -42,6 +65,9 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
         private readonly LegacyOverlayMigrator $overlayMigrator,
         private readonly StorageFolderResolver $storageFolderResolver,
         private readonly ProductMigrationPrerequisite $productMigrationPrerequisite,
+        private readonly LegacyArticleProductResolver $articleProductResolver,
+        private readonly LegacyPriceMigrator $priceMigrator,
+        private readonly LegacyColumnReporter $columnReporter,
     ) {}
 
     public function setOutput(OutputInterface $output): void
@@ -81,6 +107,9 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
             );
             return false;
         }
+        if (!$this->priceMigrator->prepare(self::LEGACY_TABLE, $this->output)) {
+            return false;
+        }
         $pid = $this->storageFolderResolver->resolve();
         while (($rows = $this->migrationHelper->fetchUnmigratedBatch(self::LEGACY_TABLE, self::LOCAL_TABLE)) !== []) {
             foreach ($rows as $row) {
@@ -88,6 +117,7 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
             }
         }
         $this->overlayMigrator->migrate($this->output, $this->overlayConfig(), $this->overlayValues(...));
+        $this->columnReporter->report(self::LEGACY_TABLE, self::HANDLED_COLUMNS, $this->output);
         return true;
     }
 
@@ -110,26 +140,51 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
     }
 
     /**
+     * An article can only belong to one product; further products linking it are reported.
+     *
      * @param array<string, mixed> $legacyRow
      */
     private function migrateArticle(array $legacyRow, int $pid): void
     {
         $legacyUid = (int)$legacyRow['uid'];
-        $productLocalUid = $this->migrationHelper->resolveLocalUid(
-            self::LEGACY_PRODUCT_TABLE,
-            (int)$legacyRow['uid_product'],
-            self::LOCAL_PRODUCT_TABLE
-        );
-        if ($productLocalUid === null) {
-            $this->output->writeln(sprintf(
-                '<comment>tt_products_articles uid %d referenced missing product uid %d, skipped.</comment>',
-                $legacyUid,
-                (int)$legacyRow['uid_product']
-            ));
-            $this->migrationHelper->recordMapping(self::LEGACY_TABLE, $legacyUid, self::LOCAL_TABLE, 0);
+        $legacyProductUids = $this->articleProductResolver->resolve($legacyUid, (int)$legacyRow['uid_product']);
+        $legacyProductUid = array_shift($legacyProductUids);
+        $productLocalUid = $legacyProductUid === null
+            ? null
+            : $this->migrationHelper->resolveLocalUid(self::LEGACY_PRODUCT_TABLE, $legacyProductUid, self::LOCAL_PRODUCT_TABLE);
+        if ($legacyProductUid === null || $productLocalUid === null) {
+            $this->skipArticle($legacyUid, $legacyProductUid === null
+                ? 'has no product (neither uid_product nor a tt_products_products_mm_articles link)'
+                : sprintf('referenced missing product uid %d', $legacyProductUid));
             return;
         }
         $this->insertArticle($legacyRow, $pid, $legacyUid, $productLocalUid);
+        $this->reportFurtherProducts($legacyUid, $legacyProductUid, $legacyProductUids);
+    }
+
+    /**
+     * Recorded with local uid 0, so the row counts as handled and its overlays are skipped too.
+     */
+    private function skipArticle(int $legacyUid, string $reason): void
+    {
+        $this->output->writeln(sprintf('<comment>tt_products_articles uid %d %s, skipped.</comment>', $legacyUid, $reason));
+        $this->migrationHelper->recordMapping(self::LEGACY_TABLE, $legacyUid, self::LOCAL_TABLE, 0);
+    }
+
+    /**
+     * @param int[] $furtherLegacyProductUids
+     */
+    private function reportFurtherProducts(int $legacyUid, int $attachedLegacyProductUid, array $furtherLegacyProductUids): void
+    {
+        foreach ($furtherLegacyProductUids as $furtherLegacyProductUid) {
+            $this->output->writeln(sprintf(
+                '<comment>tt_products_articles uid %d is also linked to tt_products uid %d; it was migrated '
+                    . 'for tt_products uid %d only, create the variant for the other product manually.</comment>',
+                $legacyUid,
+                $furtherLegacyProductUid,
+                $attachedLegacyProductUid
+            ));
+        }
     }
 
     /**
@@ -145,7 +200,7 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
             'product' => $productLocalUid,
             'title' => (string)$legacyRow['title'],
             'item_number' => (string)$legacyRow['itemnumber'],
-            'price' => $this->formatPrice((string)$legacyRow['price']),
+            'price' => $this->priceMigrator->price($legacyRow),
             'in_stock' => (int)$legacyRow['inStock'],
             'basket_min_quantity' => (int)round((float)($legacyRow['basketminquantity'] ?? 0)),
             'basket_max_quantity' => (int)round((float)($legacyRow['basketmaxquantity'] ?? 0)),
@@ -154,11 +209,7 @@ final class TtProductsArticleUpgradeWizard implements UpgradeWizardInterface, Ch
         ])->executeStatement();
         $localUid = (int)$this->connectionPool->getConnectionForTable(self::LOCAL_TABLE)->lastInsertId();
         $this->migrationHelper->recordMapping(self::LEGACY_TABLE, $legacyUid, self::LOCAL_TABLE, $localUid);
-    }
-
-    private function formatPrice(string $legacyPrice): string
-    {
-        return number_format((float)$legacyPrice, 2, '.', '');
+        $this->priceMigrator->migrateResellerPrice($legacyRow, 'article', $localUid, $pid);
     }
 
     /**

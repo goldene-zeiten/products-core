@@ -95,6 +95,27 @@ from. Set it before creating any content.
         :guilabel:`Withdrawal page` type. See
         :ref:`Order withdrawal <users-manual-withdrawal>`.
 
+    ..  confval:: products.pids.termsPage
+        :type: int
+        :Default: 0
+
+        Page uid of the terms and conditions. Linked next to the terms checkbox on the review step
+        when set.
+
+    ..  confval:: products.pids.withdrawalInstructionsPage
+        :type: int
+        :Default: 0
+
+        Page uid of the withdrawal instructions. Linked next to the terms checkbox on the review
+        step when set.
+
+    ..  confval:: products.pids.privacyPage
+        :type: int
+        :Default: 0
+
+        Page uid of the privacy policy. Linked next to the terms checkbox on the review step when
+        set.
+
     ..  confval:: products.pricing.mode
         :type: string
         :Default: gross
@@ -218,6 +239,21 @@ from. Set it before creating any content.
         :Default: true
 
         Whether the invoice payment method is offered at checkout.
+
+    ..  confval:: products.payment.invoice.excludedShipping
+        :type: string
+        :Default: (empty)
+
+        Shipping providers (e.g. ``pickup``) or single shipping options (e.g. ``ups:express``),
+        comma-separated, for which invoice is not offered - for example when orders collected in
+        store are paid on collection.
+
+    ..  confval:: products.payment.invoice.frontendUserGroups
+        :type: string
+        :Default: (empty)
+
+        Frontend user group uids, comma-separated, whose members may pay by invoice - for example
+        regular customers. Empty offers invoice to everyone, guests included.
 
     ..  confval:: products.invoice.templateRootPaths
         :type: stringlist
@@ -395,6 +431,64 @@ from. Set it before creating any content.
         Length of the withdrawal period in days; the statutory period is 14. It runs from the
         delivery of the goods, not from the order. ``0`` disables the self-service withdrawal
         entirely. See :ref:`The withdrawal period <users-manual-withdrawal-period>`.
+
+    ..  confval:: products.checkout.fields.salutation
+        :type: string
+        :Default: optional
+
+        Whether the address step offers a salutation: ``hidden``, ``optional`` or ``required``.
+        The same values apply to :confval:`products.checkout.fields.company`,
+        :confval:`products.checkout.fields.telephone` and :confval:`products.checkout.fields.vatId`.
+        ``required`` applies to the billing address; a separate delivery address may leave the
+        field empty. An unknown value falls back to the field's default.
+
+    ..  confval:: products.checkout.fields.company
+        :type: string
+        :Default: optional
+
+        Company field of the billing and the delivery address.
+
+    ..  confval:: products.checkout.fields.telephone
+        :type: string
+        :Default: optional
+
+        Phone field of the billing and the delivery address.
+
+    ..  confval:: products.checkout.fields.vatId
+        :type: string
+        :Default: hidden
+
+        VAT ID field of the billing address. It is printed on the invoice.
+
+    ..  confval:: products.checkout.allowedCountries
+        :type: string
+        :Default: (empty)
+
+        Comma-separated ISO 3166-1 alpha-2 codes the customer may choose for the billing and the
+        delivery address, e.g. ``DE,AT,CH``. Empty offers every country. Order placement refuses
+        any other country as well. The default tax country is listed first.
+
+    ..  confval:: products.checkout.salutations
+        :type: string
+        :Default: mr,ms,diverse
+
+        Salutations offered, as comma-separated keys. ``mr``, ``ms``, ``diverse`` and ``company``
+        come with labels; any other key is shown as it is unless a label
+        ``salutation.<key>`` is added to the language file.
+
+    ..  confval:: products.checkout.desiredDeliveryDate
+        :type: bool
+        :Default: false
+
+        Lets the customer enter a desired delivery date on the address step. It must lie after
+        today and is shown on the review step, in the order mails and in the backend order.
+
+    ..  confval:: products.list.maximumNumberOfLinks
+        :type: int
+        :Default: 5
+
+        How many page numbers the page links of product lists, category lists and the product
+        search show around the current page.
 
     ..  confval:: products.withdrawal.assumedDeliveryDays
         :type: int

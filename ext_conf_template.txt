@@ -1,0 +1,23 @@
+# cat=migration/price/10; type=options[Decide before migrating=undecided,Not used=unused,Selling price for every visitor=selling,Reseller price of one frontend group=reseller]; label=tt_products price2: How the legacy shop used price2. "Selling price" matches plugin.tt_products.priceNoReseller = 2 set for everyone (price2 is charged, price only where price2 is empty); "Reseller price" matches priceNoReseller = 2 inside a usergroup condition and migrates price2 as a price period of that group. The product and article migrations refuse to run while any record has a price2 and this is still undecided.
+migration.legacyPrice2 = undecided
+
+# cat=migration/price/20; type=int+; label=tt_products price2 reseller group: Frontend group uid the price2 price period applies to. Required with "Reseller price".
+migration.legacyPrice2FeGroup = 0
+
+# cat=migration/catalog/10; type=boolean; label=Storage folders become categories: The legacy catalog is grouped by storage folders rather than tt_products_cat. The wizard "Turn the tt_products storage folders into categories" creates a category per folder holding products, nested like the folders, and assigns the products; legacy list elements selecting a starting point then select these categories.
+migration.storageFolderCategories = 0
+
+# cat=migration/catalog/20; type=string; label=Columns that become categories: Comma-separated "column:Title" pairs of tt_products columns the legacy shop grouped products by, e.g. "form:Manufacturer, quality:Tags". The wizard "Turn tt_products grouping columns into categories" creates a root category "Title" per column with a child per distinct value; legacy list elements filtering such a column with product_where then select these categories.
+migration.columnCategories =
+
+# cat=migration/catalog/30; type=string; label=Columns holding several values: Comma-separated columns from "Columns that become categories" whose values are lists separated by commas, semicolons or line breaks.
+migration.columnCategoriesMultiValue =
+
+# cat=migration/catalog/40; type=boolean; label=note2 holds keywords: The legacy shop used the second text field note2 for meta keywords. The product migration then takes them as the product keywords where tt_products.keyword is empty.
+migration.note2AsKeywords = 0
+
+# cat=migration/orders/10; type=string; label=Payment of legacy orders: Comma-separated "key:identifier" pairs mapping the TypoScript keys of plugin.tt_products.payment to payment methods, e.g. "10:cashondelivery, 20:prepayment, 30:cash, 40:invoice, 90:paypal". tt_products stores the key as leading number of the order's payment text; unmapped orders become "invoice".
+migration.orderPaymentMethods =
+
+# cat=migration/orders/20; type=string; label=Shipping of legacy orders: Comma-separated "key:provider[:option]" pairs mapping the TypoScript keys of plugin.tt_products.shipping to shipping, e.g. "10:tablerate:1, 20:pickup". The legacy shipping title is kept as label; unmapped orders get no shipping.
+migration.orderShippingOptions =

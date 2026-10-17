@@ -5,10 +5,14 @@ declare(strict_types=1);
 namespace GoldeneZeiten\Products\Core\Updates;
 
 use GoldeneZeiten\Products\Core\Backend\StorageFolderResolver;
+use GoldeneZeiten\Products\Core\Domain\Dto\LineItemOption;
 use GoldeneZeiten\Products\Core\Domain\Enum\OrderStatus;
 use GoldeneZeiten\Products\Core\Domain\Enum\PaymentStatus;
+use GoldeneZeiten\Products\Core\Domain\Enum\WithdrawalExclusion;
+use GoldeneZeiten\Products\Core\Event\CollectMigratedOrderItemOptionsEvent;
 use GoldeneZeiten\Products\Core\Updates\Prerequisites\ArticleMigrationPrerequisite;
 use GoldeneZeiten\Products\Core\Updates\Prerequisites\ProductMigrationPrerequisite;
+use Psr\EventDispatcher\EventDispatcherInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\DependencyInjection\Attribute\Autoconfigure;
 use TYPO3\CMS\Core\Country\Country;
@@ -57,6 +61,8 @@ final class TtProductsOrderUpgradeWizard implements UpgradeWizardInterface, Chat
         private readonly SiteFinder $siteFinder,
         private readonly ProductMigrationPrerequisite $productMigrationPrerequisite,
         private readonly ArticleMigrationPrerequisite $articleMigrationPrerequisite,
+        private readonly LegacyMigrationConfiguration $migrationConfiguration,
+        private readonly EventDispatcherInterface $eventDispatcher,
     ) {}
 
     public function setOutput(OutputInterface $output): void
@@ -71,8 +77,9 @@ final class TtProductsOrderUpgradeWizard implements UpgradeWizardInterface, Chat
 
     public function getDescription(): string
     {
-        return 'Migrates legacy orders, their billing address and line items. All orders are mapped '
-            . 'to the "invoice" payment method (the only one this extension implements) and line item '
+        return 'Migrates legacy orders, their billing address and line items. Payment and shipping are '
+            . 'mapped through migration.orderPaymentMethods and migration.orderShippingOptions, unmapped '
+            . 'payments become "invoice", abandoned checkouts are skipped, and line item '
             . 'prices use the current catalog price, since historical prices are not reliably '
             . 'reconstructable from the legacy orderData blob.';
     }
@@ -140,6 +147,14 @@ final class TtProductsOrderUpgradeWizard implements UpgradeWizardInterface, Chat
     private function migrateOrder(array $legacyRow, int $pid): void
     {
         $legacyUid = (int)$legacyRow['uid'];
+        if ($this->isAbandonedCheckout($legacyRow)) {
+            $this->output->writeln(sprintf(
+                '<comment>sys_products_orders uid %d is an abandoned checkout without customer, amount and payment, skipped.</comment>',
+                $legacyUid
+            ));
+            $this->migrationHelper->recordMapping(self::LEGACY_TABLE, $legacyUid, self::LOCAL_TABLE, 0);
+            return;
+        }
         $country = $this->resolveCountry($legacyUid, (string)$legacyRow['country']);
         $addressUid = $this->insertAddress($legacyRow, $pid, $country[0]);
         $queryBuilder = $this->connectionPool->getQueryBuilderForTable(self::LOCAL_TABLE);
@@ -148,7 +163,9 @@ final class TtProductsOrderUpgradeWizard implements UpgradeWizardInterface, Chat
         )->executeStatement();
         $orderUid = (int)$this->connectionPool->getConnectionForTable(self::LOCAL_TABLE)->lastInsertId();
         $this->migrationHelper->recordMapping(self::LEGACY_TABLE, $legacyUid, self::LOCAL_TABLE, $orderUid);
-        $this->migrateItems($legacyUid, $orderUid, $pid);
+        if (!$this->migrateItems($legacyUid, $orderUid, $pid)) {
+            $this->migrateOrderDataItems($legacyUid, $legacyRow, $orderUid, $pid);
+        }
     }
 
     /**
@@ -168,7 +185,8 @@ final class TtProductsOrderUpgradeWizard implements UpgradeWizardInterface, Chat
             'frontend_user' => (int)$legacyRow['feusers_uid'],
             'email' => (string)$legacyRow['email'],
             'billing_address' => $addressUid,
-            'payment_method' => $this->resolvePaymentMethod($legacyUid, (int)$legacyRow['pay_mode']),
+            'payment_method' => $this->resolvePaymentMethod($legacyUid, $legacyRow),
+            ...$this->resolveShipping($legacyRow),
             'payment_status' => $paymentStatus->value,
             'status' => $status->value,
             'invoice_number' => (string)$legacyRow['bill_no'],
@@ -235,18 +253,72 @@ final class TtProductsOrderUpgradeWizard implements UpgradeWizardInterface, Chat
     }
 
     /**
-     * Only "invoice" is implemented; electronic gateways get a warning and map to it too.
+     * tt_products tells the TypoScript key of the payment by the leading number of its `payment` text,
+     * e.g. "90: PayPal Gateway"; `migration.orderPaymentMethods` maps it. Anything else becomes invoice.
+     *
+     * @param array<string, mixed> $legacyRow
      */
-    private function resolvePaymentMethod(int $legacyUid, int $legacyPayMode): string
+    private function resolvePaymentMethod(int $legacyUid, array $legacyRow): string
     {
-        if (!in_array($legacyPayMode, self::NON_ELECTRONIC_PAY_MODES, true)) {
-            $this->output->writeln(sprintf(
-                '<comment>sys_products_orders uid %d used electronic pay_mode %d, historic provider is only in legacy_order_data.</comment>',
-                $legacyUid,
-                $legacyPayMode
-            ));
+        $payment = trim((string)($legacyRow['payment'] ?? ''));
+        if ($payment === '') {
+            if (!in_array((int)$legacyRow['pay_mode'], self::NON_ELECTRONIC_PAY_MODES, true)) {
+                $this->output->writeln(sprintf(
+                    '<comment>sys_products_orders uid %d used electronic pay_mode %d, historic provider is only in legacy_order_data.</comment>',
+                    $legacyUid,
+                    (int)$legacyRow['pay_mode']
+                ));
+            }
+            return 'invoice';
         }
-        return 'invoice';
+        $method = $this->migrationConfiguration->getKeyMap('orderPaymentMethods')[$this->legacyKey($payment)] ?? null;
+        if ($method === null) {
+            $this->output->writeln(sprintf(
+                '<comment>sys_products_orders uid %d used payment "%s", which migration.orderPaymentMethods does not map; it becomes "invoice".</comment>',
+                $legacyUid,
+                $payment
+            ));
+            return 'invoice';
+        }
+        return $method;
+    }
+
+    /**
+     * The `shipping` text works like the payment's; `migration.orderShippingOptions` maps its key to a
+     * provider and, optionally, an option, e.g. "10:tablerate:1, 20:pickup". The legacy title is kept.
+     *
+     * @param array<string, mixed> $legacyRow
+     * @return array{shipping_provider: string, shipping_option: string, shipping_label: string}
+     */
+    private function resolveShipping(array $legacyRow): array
+    {
+        $shipping = trim((string)($legacyRow['shipping'] ?? ''));
+        $target = $shipping !== '' ? ($this->migrationConfiguration->getKeyMap('orderShippingOptions')[$this->legacyKey($shipping)] ?? '') : '';
+        if ($target === '') {
+            return ['shipping_provider' => '', 'shipping_option' => '', 'shipping_label' => ''];
+        }
+        [$provider, $option] = explode(':', $target, 2) + [1 => ''];
+        $label = trim(preg_replace('/^\d+\s*:/', '', $shipping) ?? $shipping);
+        return ['shipping_provider' => $provider, 'shipping_option' => $option, 'shipping_label' => $label];
+    }
+
+    private function legacyKey(string $text): int
+    {
+        return preg_match('/^(\d+)\s*:/', $text, $matches) === 1 ? (int)$matches[1] : -1;
+    }
+
+    /**
+     * tt_products creates the order row when a checkout starts; one never finished has no customer, no
+     * amount and no payment.
+     *
+     * @param array<string, mixed> $legacyRow
+     */
+    private function isAbandonedCheckout(array $legacyRow): bool
+    {
+        return trim((string)$legacyRow['email']) === ''
+            && trim((string)$legacyRow['last_name']) === ''
+            && (float)$legacyRow['amount'] === 0.0
+            && trim((string)($legacyRow['payment'] ?? '')) === '';
     }
 
     /**
@@ -342,7 +414,10 @@ final class TtProductsOrderUpgradeWizard implements UpgradeWizardInterface, Chat
         return is_array($parsed) ? $parsed : null;
     }
 
-    private function migrateItems(int $legacyOrderUid, int $orderUid, int $pid): void
+    /**
+     * @return bool whether the order had lines in the mm table
+     */
+    private function migrateItems(int $legacyOrderUid, int $orderUid, int $pid): bool
     {
         $queryBuilder = $this->connectionPool->getQueryBuilderForTable(self::LEGACY_MM_TABLE);
         $queryBuilder->getRestrictions()->removeAll();
@@ -350,9 +425,99 @@ final class TtProductsOrderUpgradeWizard implements UpgradeWizardInterface, Chat
             ->andWhere($queryBuilder->expr()->eq('deleted', 0))
             ->andWhere($queryBuilder->expr()->eq('uid_local', $queryBuilder->createNamedParameter($legacyOrderUid)))
             ->executeQuery();
+        $found = false;
         while ($row = $result->fetchAssociative()) {
             $this->migrateItem($row, $orderUid, $pid);
+            $found = true;
         }
+        return $found;
+    }
+
+    /**
+     * tt_products 3.5 often writes no mm rows; the lines then live in orderData/itemArray, keyed by item
+     * number, with the product row in `rec`, the article in `rec/ext/tt_products_articles` and the prices
+     * actually charged next to it.
+     *
+     * @param array<string, mixed> $legacyRow
+     */
+    private function migrateOrderDataItems(int $legacyUid, array $legacyRow, int $orderUid, int $pid): void
+    {
+        $orderData = $this->parseSerializedBlob($legacyUid, $legacyRow['orderData'] ?? null, 'orderData') ?? [];
+        $itemArray = is_array($orderData['itemArray'] ?? null) ? $orderData['itemArray'] : [];
+        $itemArray = is_array($itemArray['tt_products'] ?? null) ? $itemArray['tt_products'] : $itemArray;
+        foreach ($itemArray as $lines) {
+            foreach (is_array($lines) ? $lines : [] as $line) {
+                if (is_array($line) && is_array($line['rec'] ?? null)) {
+                    $this->migrateOrderDataItem($legacyUid, $line, $orderUid, $pid);
+                }
+            }
+        }
+    }
+
+    /**
+     * @param array<string, mixed> $line
+     */
+    private function migrateOrderDataItem(int $legacyUid, array $line, int $orderUid, int $pid): void
+    {
+        $record = $line['rec'];
+        $productLocalUid = $this->migrationHelper->resolveLocalUid(self::LEGACY_PRODUCT_TABLE, (int)($record['uid'] ?? 0), self::LOCAL_PRODUCT_TABLE);
+        // The line carries everything an order item snapshots, so a product removed since does not lose it.
+        if ($productLocalUid === null || $productLocalUid === 0) {
+            $this->output->writeln(sprintf(
+                '<comment>sys_products_orders uid %d ordered product uid %d, which no longer exists; the line is kept without a product link.</comment>',
+                $legacyUid,
+                (int)($record['uid'] ?? 0)
+            ));
+            $productLocalUid = 0;
+        }
+        $legacyArticleUid = $productLocalUid !== 0 ? (int)($record['ext']['tt_products_articles'][0]['uid'] ?? 0) : 0;
+        $articleLocalUid = $legacyArticleUid > 0
+            ? (int)$this->migrationHelper->resolveLocalUid(self::LEGACY_ARTICLE_TABLE, $legacyArticleUid, self::LOCAL_ARTICLE_TABLE)
+            : 0;
+        $values = $this->orderDataItemValues($line, $articleLocalUid);
+        $optionsEvent = new CollectMigratedOrderItemOptionsEvent($record);
+        $this->eventDispatcher->dispatch($optionsEvent);
+        $lineOptions = array_map(static fn(LineItemOption $option): array => $option->toArray(), $optionsEvent->getOptions());
+        $values['options'] = (string)json_encode($lineOptions !== [] ? ['lineOptions' => $lineOptions] : new \stdClass());
+        foreach ($optionsEvent->getOptions() as $option) {
+            if ($option->isPersonalizing()) {
+                $values['withdrawal_exclusion'] = WithdrawalExclusion::PERSONALIZED->value;
+            }
+        }
+        $queryBuilder = $this->connectionPool->getQueryBuilderForTable(self::LOCAL_ITEM_TABLE);
+        $queryBuilder->insert(self::LOCAL_ITEM_TABLE)->values([
+            'pid' => $pid,
+            'parent_order' => $orderUid,
+            'product' => $productLocalUid,
+            'article' => $articleLocalUid,
+            ...$values,
+        ])->executeStatement();
+    }
+
+    /**
+     * The charged prices carry float noise and are rounded to cents; net and VAT of the line follow its gross.
+     *
+     * @param array<string, mixed> $line
+     * @return array<string, mixed>
+     */
+    private function orderDataItemValues(array $line, int $articleLocalUid): array
+    {
+        $record = $line['rec'];
+        $article = $articleLocalUid !== 0 ? $this->fetchRow(self::LOCAL_ARTICLE_TABLE, $articleLocalUid, ['title', 'item_number']) : null;
+        $lineGross = (int)round((float)($line['totalTax'] ?? 0) * 100);
+        $lineNet = (int)round((float)($line['totalNoTax'] ?? 0) * 100);
+        return [
+            'title' => (string)($record['title'] ?? ''),
+            'article_title' => (string)($article['title'] ?? ''),
+            'item_number' => (string)($article['item_number'] ?? $record['itemnumber'] ?? ''),
+            'quantity' => (int)($line['count'] ?? 0),
+            'unit_price_net' => (int)round((float)($line['priceNoTax'] ?? 0) * 100),
+            'unit_price_gross' => (int)round((float)($line['priceTax'] ?? 0) * 100),
+            'tax_rate' => (float)($line['tax'] ?? 0) / 100,
+            'line_total_net' => $lineNet,
+            'line_total_tax' => $lineGross - $lineNet,
+            'line_total_gross' => $lineGross,
+        ];
     }
 
     /**
@@ -365,12 +530,14 @@ final class TtProductsOrderUpgradeWizard implements UpgradeWizardInterface, Chat
             (int)$legacyItemRow['uid_foreign'],
             self::LOCAL_PRODUCT_TABLE
         );
-        if ($productLocalUid === null) {
+        // An order must be kept as it was placed, so a line of a product removed since stays, unlinked.
+        if ($productLocalUid === null || $productLocalUid === 0) {
             $this->output->writeln(sprintf(
-                '<comment>sys_products_orders_mm_tt_products uid %d referenced missing product uid %d, item dropped.</comment>',
+                '<comment>sys_products_orders_mm_tt_products uid %d referenced missing product uid %d; the line is kept without a product link.</comment>',
                 (int)$legacyItemRow['uid'],
                 (int)$legacyItemRow['uid_foreign']
             ));
+            $this->insertItem($legacyItemRow, $orderUid, 0, 0, $pid);
             return;
         }
         $articleLocalUid = $this->resolveArticle((int)$legacyItemRow['uid'], (int)$legacyItemRow['tt_products_articles_uid']);

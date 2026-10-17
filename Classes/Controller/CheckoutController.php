@@ -8,6 +8,7 @@ use GoldeneZeiten\Products\Core\Configuration\ProductsConfigurationFactory;
 use GoldeneZeiten\Products\Core\Domain\Dto\Address;
 use GoldeneZeiten\Products\Core\Domain\Dto\BasketViewModel;
 use GoldeneZeiten\Products\Core\Domain\Dto\Checkout\CheckoutChoices;
+use GoldeneZeiten\Products\Core\Domain\Dto\Checkout\CheckoutFieldConfiguration;
 use GoldeneZeiten\Products\Core\Domain\Dto\Checkout\CheckoutSelections;
 use GoldeneZeiten\Products\Core\Domain\Dto\Order\OrderTotals;
 use GoldeneZeiten\Products\Core\Domain\Dto\Payment\PaymentContext;
@@ -19,10 +20,12 @@ use GoldeneZeiten\Products\Core\Event\EnrichCheckoutReviewEvent;
 use GoldeneZeiten\Products\Core\Payment\Exception\PaymentMethodNotAvailableException;
 use GoldeneZeiten\Products\Core\Payment\Exception\PaymentMethodNotFoundException;
 use GoldeneZeiten\Products\Core\Payment\PaymentContextFactory;
+use GoldeneZeiten\Products\Core\Payment\PaymentInstructionsResolver;
 use GoldeneZeiten\Products\Core\Payment\PaymentMethodInterface;
 use GoldeneZeiten\Products\Core\Payment\PaymentMethodRegistry;
 use GoldeneZeiten\Products\Core\Security\FrontendRequestTokenValidator;
 use GoldeneZeiten\Products\Core\Service\Checkout\AddressCompletenessChecker;
+use GoldeneZeiten\Products\Core\Service\Checkout\CheckoutFieldConfigurationFactory;
 use GoldeneZeiten\Products\Core\Service\Checkout\CheckoutService;
 use GoldeneZeiten\Products\Core\Service\Checkout\PriceQuoteService;
 use GoldeneZeiten\Products\Core\Service\FrontendUserResolver;
@@ -41,6 +44,7 @@ use GoldeneZeiten\Products\Core\Shipping\ShippingQuoteService;
 use Psr\Http\Message\ResponseInterface;
 use TYPO3\CMS\Core\Http\PropagateResponseException;
 use TYPO3\CMS\Core\Http\RedirectResponse;
+use TYPO3\CMS\Core\Site\Entity\Site;
 use TYPO3\CMS\Core\Type\ContextualFeedbackSeverity;
 use TYPO3\CMS\Extbase\Mvc\Controller\ActionController;
 use TYPO3\CMS\Extbase\Utility\LocalizationUtility;
@@ -76,7 +80,9 @@ final class CheckoutController extends ActionController
         private readonly ProductsConfigurationFactory $configurationFactory,
         private readonly PriceQuoteService $priceQuoteService,
         private readonly WithdrawalExclusionService $withdrawalExclusionService,
+        private readonly PaymentInstructionsResolver $paymentInstructionsResolver,
         private readonly AddressCompletenessChecker $addressCompletenessChecker,
+        private readonly CheckoutFieldConfigurationFactory $fieldConfigurationFactory,
         private readonly OrderCreationService $orderCreationService,
         private readonly ErrorController $errorController,
         private readonly FrontendRequestTokenValidator $requestTokenValidator
@@ -107,8 +113,33 @@ final class CheckoutController extends ActionController
             'deliveryAddress' => $deliveryAddress ?? new Address(),
             'shipToDifferentAddress' => $deliveryAddress !== null,
             'giftMessage' => $this->checkoutService->getGiftMessage($this->request),
+            'customerNote' => $this->checkoutService->getCustomerNote($this->request),
+            'desiredDeliveryDate' => $this->checkoutService->getDesiredDeliveryDate($this->request)?->format('Y-m-d') ?? '',
+            'earliestDeliveryDate' => (new \DateTimeImmutable('tomorrow'))->format('Y-m-d'),
+            'fields' => $this->fieldConfiguration(),
+            'defaultCountry' => $this->configurationFactory->create($this->request)->getDefaultCountry(),
+            'salutationOptions' => $this->salutationOptions(),
         ]);
         return $this->htmlResponse();
+    }
+
+    private function fieldConfiguration(): CheckoutFieldConfiguration
+    {
+        $site = $this->request->getAttribute('site');
+        return $this->fieldConfigurationFactory->fromSite($site instanceof Site ? $site : null);
+    }
+
+    /**
+     * @return array<string, string> salutation key => label
+     */
+    private function salutationOptions(): array
+    {
+        $options = [];
+        foreach ($this->fieldConfiguration()->getSalutations() as $salutation) {
+            $label = $this->translate('salutation.' . $salutation);
+            $options[$salutation] = $label !== '' ? $label : $salutation;
+        }
+        return $options;
     }
 
     /**
@@ -124,32 +155,47 @@ final class CheckoutController extends ActionController
         }
     }
 
-    public function submitAddressAction(Address $address, bool $shipToDifferentAddress = false, ?Address $deliveryAddress = null, string $giftMessage = ''): ResponseInterface
-    {
-        if ($shipToDifferentAddress && !$this->addressCompletenessChecker->isComplete($deliveryAddress ?? new Address(), emailRequired: false)) {
+    /**
+     * Takes every field of the address form as its own argument, as Extbase maps them, hence more than
+     * five parameters.
+     */
+    public function submitAddressAction(
+        Address $address,
+        bool $shipToDifferentAddress = false,
+        ?Address $deliveryAddress = null,
+        string $giftMessage = '',
+        string $customerNote = '',
+        string $desiredDeliveryDate = '',
+    ): ResponseInterface {
+        $fields = $this->fieldConfiguration();
+        if ($shipToDifferentAddress && !$this->addressCompletenessChecker->isComplete($deliveryAddress ?? new Address(), false, $fields->forDeliveryAddress())) {
             $this->backToStep('address', $this->translate('checkout_delivery_address_incomplete'));
         }
+        $deliveryDate = $this->resolveDesiredDeliveryDate($desiredDeliveryDate, $fields);
         $this->checkoutService->setAddress($this->request, $address);
         $this->checkoutService->setDeliveryAddress($this->request, $shipToDifferentAddress ? $deliveryAddress : null);
         $this->checkoutService->setGiftMessage($this->request, $giftMessage);
+        $this->checkoutService->setCustomerNote($this->request, trim($customerNote));
+        $this->checkoutService->setDesiredDeliveryDate($this->request, $deliveryDate);
         $configuration = $this->configurationFactory->create($this->request);
-        return $this->redirect($configuration->isShippingEnabled() ? 'shippingMethod' : 'payment');
+        $this->propagate($this->redirect($configuration->isShippingEnabled() ? 'shippingMethod' : 'payment'));
     }
 
     public function shippingMethodAction(): ResponseInterface
     {
         $configuration = $this->configurationFactory->create($this->request);
         if (!$configuration->isShippingEnabled()) {
-            return $this->redirect('payment');
+            $this->propagate($this->redirect('payment'));
         }
         $options = $this->shippingQuoteService->getAvailableOptions($configuration, $this->shippingContext());
         if ($options === []) {
             $this->addFlashMessage($this->translate('checkout_no_shipping_available'), '', ContextualFeedbackSeverity::ERROR);
-            return $this->redirect('address');
+            $this->propagate($this->redirect('address'));
         }
         $this->view->assignMultiple([
             'shippingOptions' => $options,
             'selectedShippingOption' => $this->selectedShippingOption($options),
+            'currency' => $configuration->getCurrency(),
         ]);
         return $this->htmlResponse();
     }
@@ -161,7 +207,7 @@ final class CheckoutController extends ActionController
             $this->backToStep('shippingMethod', $this->translate('checkout_shipping_option_required'));
         }
         $this->checkoutService->setShippingOption($this->request, $shippingOption);
-        return $this->redirect('payment');
+        $this->propagate($this->redirect('payment'));
     }
 
     private function shippingContext(): ShippingContext
@@ -217,6 +263,30 @@ final class CheckoutController extends ActionController
         throw new PropagateResponseException($this->redirect($action), 1791662865);
     }
 
+    /**
+     * The checkout plugin is uncached: a returned redirect would only be sent as a header beside the
+     * rendered page, so it is propagated as the response of the request instead.
+     */
+    private function propagate(ResponseInterface $response): never
+    {
+        throw new PropagateResponseException($response, 1792163431);
+    }
+
+    /**
+     * A desired delivery date is optional; when given it must be a real date after today.
+     */
+    private function resolveDesiredDeliveryDate(string $value, CheckoutFieldConfiguration $fields): ?\DateTimeImmutable
+    {
+        if (!$fields->isDesiredDeliveryDateEnabled() || trim($value) === '') {
+            return null;
+        }
+        $date = \DateTimeImmutable::createFromFormat('!Y-m-d', trim($value));
+        if (!$date instanceof \DateTimeImmutable || $date < new \DateTimeImmutable('tomorrow')) {
+            $this->backToStep('address', $this->translate('checkout_desired_delivery_date_invalid'));
+        }
+        return $date;
+    }
+
     private function translate(string $key): string
     {
         return (string)LocalizationUtility::translate($key, 'ProductsCore');
@@ -238,7 +308,7 @@ final class CheckoutController extends ActionController
             $this->backToStep('payment', $this->translate('checkout_payment_method_required'));
         }
         $this->checkoutService->setPaymentMethod($this->request, $paymentMethod);
-        return $this->redirect('review');
+        $this->propagate($this->redirect('review'));
     }
 
     public function reviewAction(): ResponseInterface
@@ -261,6 +331,8 @@ final class CheckoutController extends ActionController
             'shippingSelection' => $shippingSelection,
             'deliveryAddress' => $this->checkoutService->getDeliveryAddress($this->request),
             'giftMessage' => $this->checkoutService->getGiftMessage($this->request),
+            'customerNote' => $this->checkoutService->getCustomerNote($this->request),
+            'desiredDeliveryDate' => $this->checkoutService->getDesiredDeliveryDate($this->request),
             'withdrawalWaiverRequired' => $this->withdrawalExclusionService->basketRequiresWaiver($basket),
             'withdrawalExemptPersonalizedItems' => $this->withdrawalExclusionService->basketContainsPersonalized($basket),
         ] + $enrichEvent->getVariables());
@@ -325,7 +397,9 @@ final class CheckoutController extends ActionController
             $this->checkoutService->getDeliveryAddress($this->request),
             $this->checkoutService->getGiftMessage($this->request),
             $termsAccepted,
-            $withdrawalWaiverAccepted
+            $withdrawalWaiverAccepted,
+            $this->checkoutService->getCustomerNote($this->request),
+            $this->checkoutService->getDesiredDeliveryDate($this->request),
         );
 
         try {
@@ -335,13 +409,13 @@ final class CheckoutController extends ActionController
         }
 
         if ($result->requiresRedirect()) {
-            return new RedirectResponse($result->getRedirectUrl());
+            $this->propagate(new RedirectResponse($result->getRedirectUrl()));
         }
 
-        return $this->redirect('thankYou', null, null, [
+        $this->propagate($this->redirect('thankYou', null, null, [
             'order' => $result->getOrder()->getUid(),
             'hash' => $this->orderTokenService->generateToken($result->getOrder()),
-        ]);
+        ]));
     }
 
     /**
@@ -379,6 +453,7 @@ final class CheckoutController extends ActionController
             'withdrawalHash' => $this->withdrawalTokenService->generateToken($orderObject),
             'orderHash' => $this->orderTokenService->generateToken($orderObject),
             'withdrawalExcluded' => $this->withdrawalExclusionService->isFullyExcluded($orderObject),
+            'paymentInstructions' => $this->paymentInstructionsResolver->resolve($orderObject),
         ]);
         return $this->htmlResponse();
     }
@@ -388,6 +463,6 @@ final class CheckoutController extends ActionController
         $address = $this->checkoutService->getAddress($this->request);
         $basket = $this->checkoutService->getBasketViewModel($this->request);
         $frontendUserUid = $this->frontendUserResolver->getUid($this->request);
-        return $this->paymentContextFactory->createFromBasket($basket, $address, $frontendUserUid);
+        return $this->paymentContextFactory->createFromBasket($basket, $address, $frontendUserUid, $this->checkoutService->getShippingOption($this->request));
     }
 }
