@@ -117,6 +117,24 @@
 			<trans-unit id="setting.products.payment.invoice.frontendUserGroups.description" resname="setting.products.payment.invoice.frontendUserGroups.description">
 				<source>Comma-separated frontend user group uids, e.g. for regular customers; empty offers invoice to everyone, guests included.</source>
 			</trans-unit>
+			<trans-unit id="setting.products.invoice.vatId" resname="setting.products.invoice.vatId">
+				<source>VAT ID of the seller</source>
+			</trans-unit>
+			<trans-unit id="setting.products.invoice.vatId.description" resname="setting.products.invoice.vatId.description">
+				<source>Printed on every invoice. Seller name and address come from the withdrawal trader settings.</source>
+			</trans-unit>
+			<trans-unit id="setting.products.invoice.taxNumber" resname="setting.products.invoice.taxNumber">
+				<source>Tax number of the seller</source>
+			</trans-unit>
+			<trans-unit id="setting.products.invoice.taxNumber.description" resname="setting.products.invoice.taxNumber.description">
+				<source>Printed on every invoice when set; § 14 UStG requires the VAT ID or the tax number.</source>
+			</trans-unit>
+			<trans-unit id="setting.products.pids.shopPage" resname="setting.products.pids.shopPage">
+				<source>Shop page</source>
+			</trans-unit>
+			<trans-unit id="setting.products.pids.shopPage.description" resname="setting.products.pids.shopPage.description">
+				<source>Where "Back to shop" leads after an order; the site root when empty.</source>
+			</trans-unit>
 			<trans-unit id="setting.products.shipping.enabled" resname="setting.products.shipping.enabled">
 				<source>Shipping cost calculation enabled</source>
 			</trans-unit>

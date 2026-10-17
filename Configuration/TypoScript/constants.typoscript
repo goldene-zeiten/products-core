@@ -12,6 +12,8 @@ products {
         basketPage = 0
         # cat=products/storage; type=int; label=Checkout page UID
         checkoutPage = 0
+        # cat=products/storage; type=int; label=Shop page UID: Where "Back to shop" leads after an order; the site root when empty
+        shopPage = 0
         # cat=products/storage; type=int; label=Order history page UID
         orderHistoryPage = 0
         # cat=products/storage; type=int; label=Category navigation/listing page UID
@@ -156,6 +158,10 @@ products {
     invoice {
         # cat=products/invoice; type=int; label=Invoice download page typeNum
         pageType = 1729512001
+        # cat=products/invoice; type=string; label=VAT ID of the seller: Printed on every invoice (§ 14 UStG); the seller name and address come from the withdrawal trader settings
+        vatId =
+        # cat=products/invoice; type=string; label=Tax number of the seller: Printed on every invoice when set
+        taxNumber =
     }
     seo {
         # cat=products/seo; type=string; label=Product single-view page-title substitution (none|title|subtitleOrTitle|titleAndSubtitle|subtitleAndTitle)
