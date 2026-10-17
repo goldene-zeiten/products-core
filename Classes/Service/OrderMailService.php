@@ -94,7 +94,8 @@ final class OrderMailService
             'instructions' => $this->instructionsBuilder->build(
                 $withdrawalSettings,
                 $this->instructionsBuilder->variantFor($order),
-                $this->withdrawalUrlFactory->createFunctionUrlFor($order)
+                $this->withdrawalUrlFactory->createFunctionUrlFor($order),
+                $this->locale($order)
             ),
         ]);
     }
@@ -276,7 +277,8 @@ final class OrderMailService
             'instructions' => $this->instructionsBuilder->build(
                 $withdrawalSettings,
                 $this->instructionsBuilder->variantFor($order),
-                $this->withdrawalUrlFactory->createFunctionUrlFor($order)
+                $this->withdrawalUrlFactory->createFunctionUrlFor($order),
+                $this->locale($order)
             ),
         ]);
         $this->send($email, $order, 'WithdrawalAcknowledgement');
@@ -354,6 +356,7 @@ final class OrderMailService
             ->assignMultiple([
                 'order' => $order,
                 'moneyLocale' => $this->settingsResolver->getLocale($order),
+                'trader' => $this->withdrawalSettingsFactory->fromSettings($settings)->trader,
                 ...$this->paymentVariables($order),
             ]);
 
