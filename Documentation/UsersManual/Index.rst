@@ -126,6 +126,51 @@ follows directly from how TYPO3's core `DataHandler` permission checks work, not
 specific to this extension. A flash message summarises how many records moved, or reports any
 failure (e.g. a non-Sysfolder destination) instead of moving nothing silently.
 
+..  _users-manual-manufacturers:
+
+Manufacturers and product safety information
+=============================================
+
+Create the makers of your products as :guilabel:`Manufacturer` records in the same folder as the products
+and pick one in the :guilabel:`Manufacturer` field of each product. A variant (article) uses the manufacturer
+of its product.
+
+The detail page shows the manufacturer in the block "Manufacturer information" and the product's structured
+data (JSON-LD) carries it as ``brand`` and ``manufacturer``.
+
+The EU General Product Safety Regulation (EU) 2023/988, Art. 19, requires an online offer to show:
+
+*  the manufacturer's name (registered trade name or trademark): :guilabel:`Name` and, if the products are sold
+   under a different trademark, :guilabel:`Brand name`
+*  the manufacturer's postal address: :guilabel:`Street and number`, :guilabel:`ZIP code`, :guilabel:`City`
+   and :guilabel:`Country`
+*  the manufacturer's electronic address: :guilabel:`Email address` or :guilabel:`Contact URL`
+*  for a manufacturer outside the EU, the responsible person in the EU, on the tab
+   :guilabel:`EU responsible person` (name, postal address, email)
+
+The description, the logo and the link to a page are optional and not part of the legal minimum.
+
+Listing manufacturers
+---------------------
+
+The content element :guilabel:`Manufacturer List` shows the brand names of the manufacturers that have at
+least one visible product, ordered by name. Each links to its :guilabel:`Page`, otherwise to its
+:guilabel:`Website`, otherwise it is not linked. A manufacturer with its logo set shows the logo as well.
+
+The list uses the product list's fields:
+
+:guilabel:`Categories`
+    A manufacturer is listed if it has a product in at least one of the selected categories, each
+    including its subcategories.
+
+:guilabel:`Filter categories`
+    The product must also be in every one of these categories (again including subcategories). With the
+    category "Wedding rings" and the filter category "White gold", the list shows the manufacturers that
+    have a white gold wedding ring.
+
+Without any category, every manufacturer with a visible product is listed. Hidden manufacturers, and
+manufacturers whose products are all hidden, are not listed.
+
 ..  _users-manual-cross-selling:
 
 Cross-selling: related and accessory products
